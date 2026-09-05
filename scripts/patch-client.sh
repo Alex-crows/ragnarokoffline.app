@@ -383,7 +383,15 @@ else:
         "\t\t\t// this, and only clears it on a successful buy or on our close\n"
         "\t\t\t// packet -- so the window has to answer either way.\n"
         "\t\t\tif (PACKETVER.value >= 20151104) {\n"
-        "\t\t\t\tStylist.append();\n"
+        "\t\t\t\t// Guarded: a window that throws while appending leaves the\n"
+        "\t\t\t\t// component half-attached and holding the keyboard, and the\n"
+        "\t\t\t\t// player has no way back to character select but to quit.\n"
+        "\t\t\t\ttry {\n"
+        "\t\t\t\t\tStylist.append();\n"
+        "\t\t\t\t} catch (e) {\n"
+        "\t\t\t\t\tconsole.error('[Stylist] could not open:', e);\n"
+        "\t\t\t\t\tStylist.remove();\n"
+        "\t\t\t\t}\n"
         "\t\t\t}\n"
         "\t\t\tbreak;\n"
         "\t\tcase 7:"
@@ -392,4 +400,38 @@ else:
         sys.exit("UIOpen.js: the ui_type switch no longer matches; re-check the patch")
     p.write_text(s.replace(old, new, 1))
     print("patched UIOpen.js (ui_type 1 opens the stylist)")
+
+# 0006 - A component that asks for `height: 100%` must get it.
+#
+# GUIComponent builds: host div -> shadow root -> div.ui-component-root ->
+# the component's own markup. That container is never given a size, so a
+# percentage height inside a component resolves against `auto` and collapses
+# to the height of whatever is in normal flow -- for the refine window, its
+# 17px title bar. `.panel { height: 100%; overflow: hidden }` then clipped
+# the 301px of window behind it, which is why Refine opened as a sliver with
+# the title bar and nothing else. Measured in a running client: the host was
+# a correct 261x350 while the markup inside it was 261x17.
+#
+# Width was never affected -- the container is a block inside a host of
+# definite width, so `width: 100%` already had something to resolve against.
+# Only height needs saying, and saying it is inert for the many components
+# whose host has no definite height: a percentage of an indefinite height is
+# still auto.
+p = rb / "src/UI/Common.css"
+s = p.read_text()
+if "ui-component-root" in s:
+    print("Common.css already patched")
+else:
+    p.write_text(s + """
+/* The shadow container every component's markup sits in.
+
+   It had no size of its own, so a component asking for `height: 100%`
+   resolved it against `auto` and collapsed to its content -- a title bar and
+   nothing else, with the rest clipped by any `overflow: hidden` beneath it.
+   Inert where the host has no definite height, which is most components. */
+.ui-component-root {
+\theight: 100%;
+}
+""")
+    print("patched Common.css (.ui-component-root fills its host)")
 PY
