@@ -276,4 +276,120 @@ elif s.count(old) == 1:
     print("patched CharEngine.js (database stall breadcrumb)")
 else:
     sys.exit("CharEngine.js: onReceiveMapInfo retry no longer matches; re-check the patch")
+
+# 0005 - The stylist window (ZC_UI_OPEN, ui_type 1).
+#
+# roBrowser implements three of the eleven ui_types a server can ask for.
+# The stylist is not one of them: onUIOpen logged "not implemented" and
+# returned, so every renewal stylist NPC closed its dialogue and opened
+# nothing, leaving the player facing an NPC that does not answer. rAthena has
+# no fallback for it either -- unlike the refine window there is no server
+# flag that offers the old menu instead.
+#
+# Three packets and a window. The packets are ours to add because roBrowser
+# never defined them: CZ_REQ_STYLE_CHANGE2 (0xafc, the one a 2018+ client
+# sends), CZ_REQ_STYLE_CLOSE (0xa48) and ZC_STYLE_CHANGE_RES (0xa47).
+comp = rb / "src/UI/Components/Stylist"
+comp.mkdir(parents=True, exist_ok=True)
+for name in ("Stylist.js", "Stylist.html", "Stylist.css"):
+    shutil.copyfile(root / "patches" / name, comp / name)
+print("installed the Stylist component")
+
+p = rb / "src/Network/PacketStructure.js"
+s = p.read_text()
+if "CZ_REQ_STYLE_CHANGE2" in s:
+    print("PacketStructure.js already patched")
+else:
+    anchor = "export default PACKET;"
+    if anchor not in s:
+        sys.exit("PacketStructure.js: no `export default PACKET;` to append before")
+    block = """
+// 0xafc - the stylist's "buy this look".
+//
+// Every field is an index into the server's stylist table, not a look value,
+// and a zero means "leave this one alone". CHANGE2 rather than CHANGE: a
+// client of 2018-05-16 or newer sends the longer one, which carries BodyStyle.
+PACKET.CZ.REQ_STYLE_CHANGE2 = function PACKET_CZ_REQ_STYLE_CHANGE2() {
+	this.HeadPalette = 0;
+	this.HeadStyle = 0;
+	this.BodyPalette = 0;
+	this.TopAccessory = 0;
+	this.MidAccessory = 0;
+	this.BottomAccessory = 0;
+	this.BodyStyle = 0;
+};
+PACKET.CZ.REQ_STYLE_CHANGE2.prototype.build = function () {
+	const pkt_buf = new BinaryWriter(16);
+
+	pkt_buf.writeShort(0xafc);
+	pkt_buf.writeShort(this.HeadPalette);
+	pkt_buf.writeShort(this.HeadStyle);
+	pkt_buf.writeShort(this.BodyPalette);
+	pkt_buf.writeShort(this.TopAccessory);
+	pkt_buf.writeShort(this.MidAccessory);
+	pkt_buf.writeShort(this.BottomAccessory);
+	pkt_buf.writeShort(this.BodyStyle);
+
+	return pkt_buf;
+};
+
+// 0xa48 - the window is gone. Without it the server leaves stylist_open set
+// and refuses to open it a second time until the next map change.
+PACKET.CZ.REQ_STYLE_CLOSE = function PACKET_CZ_REQ_STYLE_CLOSE() {};
+PACKET.CZ.REQ_STYLE_CLOSE.prototype.build = function () {
+	const pkt_buf = new BinaryWriter(2);
+
+	pkt_buf.writeShort(0xa48);
+
+	return pkt_buf;
+};
+
+// 0xa47 - flag is non-zero when the server refused the look.
+PACKET.ZC.STYLE_CHANGE_RES = function PACKET_ZC_STYLE_CHANGE_RES(fp, end) {
+	this.flag = fp.readUChar();
+};
+PACKET.ZC.STYLE_CHANGE_RES.size = 3;
+
+"""
+    p.write_text(s.replace(anchor, block + anchor, 1))
+    print("patched PacketStructure.js (stylist packets)")
+
+p = rb / "src/Network/PacketRegister.js"
+s = p.read_text()
+if "STYLE_CHANGE_RES" in s:
+    print("PacketRegister.js already patched")
+else:
+    anchor = "\t0xa4e: PACKET.ZC.RANDOM_COMBINE_ITEM_UI_OPEN,"
+    if anchor not in s:
+        sys.exit("PacketRegister.js: no 0xa4e line to hang the stylist response off")
+    p.write_text(s.replace(anchor, "\t0xa47: PACKET.ZC.STYLE_CHANGE_RES,\n" + anchor, 1))
+    print("patched PacketRegister.js (0xa47)")
+
+p = rb / "src/Engine/MapEngine/UIOpen.js"
+s = p.read_text()
+if "Stylist" in s:
+    print("UIOpen.js already patched")
+else:
+    s = s.replace(
+        "import EnchantUI from 'UI/Components/Enchant/Enchant.js';",
+        "import EnchantUI from 'UI/Components/Enchant/Enchant.js';\nimport Stylist from 'UI/Components/Stylist/Stylist.js';",
+        1,
+    )
+    old = "\tswitch (pkt.ui_type) {\n\t\tcase 7:"
+    new = (
+        "\tswitch (pkt.ui_type) {\n"
+        "\t\tcase 1:\n"
+        "\t\t\t// The stylist. rAthena sets sd->state.stylist_open when it sends\n"
+        "\t\t\t// this, and only clears it on a successful buy or on our close\n"
+        "\t\t\t// packet -- so the window has to answer either way.\n"
+        "\t\t\tif (PACKETVER.value >= 20151104) {\n"
+        "\t\t\t\tStylist.append();\n"
+        "\t\t\t}\n"
+        "\t\t\tbreak;\n"
+        "\t\tcase 7:"
+    )
+    if old not in s:
+        sys.exit("UIOpen.js: the ui_type switch no longer matches; re-check the patch")
+    p.write_text(s.replace(old, new, 1))
+    print("patched UIOpen.js (ui_type 1 opens the stylist)")
 PY
