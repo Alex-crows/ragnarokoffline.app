@@ -138,6 +138,11 @@ echo "==> config"
 cp "$ROOT"/config/*                          "$PAYLOAD/config/"
 cp "$ROOT"/patches/*                         "$PAYLOAD/patches/"
 
+# The app's own client artwork (the quest window's tab strip). Copied whole:
+# link-assets reads it from the runtime root the same way it reads config/.
+mkdir -p "$PAYLOAD/client-assets"
+cp -R "$ROOT"/client-assets/* "$PAYLOAD/client-assets/"
+
 echo "==> guest images"
 # nebula downloads these from its GitHub releases on first `up`. Shipping them
 # is what makes a fresh machine work with no network at all, and nebula's
