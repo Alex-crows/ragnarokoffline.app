@@ -234,6 +234,17 @@ pub fn link(cfg: &Config, args: &[String]) -> Result<(), String> {
     //
     // Mods live in state/mods, not in the asset root, so rebuilding this tree
     // on every link cannot destroy them.
+    // The app's own client artwork, over the translation and under the mods.
+    //
+    // For the handful of files where the English patch in a player's GRF is
+    // simply wrong rather than absent -- the quest window's tab strip is drawn
+    // for three tabs when the client has had four for years, so the fourth is
+    // a magenta hole that still takes clicks. Nothing here is a translation,
+    // so it does not belong in ROenglishRE, and nothing here is optional, so
+    // it does not belong in a mod. Written in the ASCII alias form, so the
+    // repository holds no CP949 filenames.
+    let _ = copy_data_aliased(&cfg.root.join("client-assets/data"), &server_root.join("data"));
+
     let (plugins, item_tables) = overlay_mods(cfg, &server_root, &merged);
 
     // Written after the overlay rather than before it, so a link that fails

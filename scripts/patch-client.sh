@@ -434,4 +434,40 @@ else:
 }
 """)
     print("patched Common.css (.ui-component-root fills its host)")
+
+# 0007 - The quest window showed nothing, on every tab.
+#
+# Quest.css defaults all four lists to `display: none`:
+#
+#     #active-quest-list, #feature-quest-list,
+#     #inactive-quest-list, #cooldown-quest-list { display: none; }
+#
+# and the code that means "show this one" writes `style.display = ''`. That
+# does not show anything: it clears the *inline* override and lets the
+# stylesheet rule apply again, so the list falls straight back to none. Every
+# tab was empty for every character, which is what made it look like a packet
+# problem -- the quest list arrives and parses correctly, the rows are built
+# and appended, and then nothing is ever displayed.
+#
+# `block` rather than removing the CSS rule: the rule is what hides the other
+# three lists, and a <ul> is display:block anyway, so this is what the eight
+# call sites already meant.
+# Two spellings of the same mistake: the tab handler names the list inline,
+# while the code that shows ACTIVE when the window first opens goes through a
+# local. Missing the second is why the window still came up empty and only
+# filled in after clicking away to another tab and back.
+p = rb / "src/UI/Components/Quest/QuestCommon.js"
+s = p.read_text()
+subs = [
+    ("-quest-list').style.display = '';", "-quest-list').style.display = 'block';"),
+    ("activeList.style.display = '';", "activeList.style.display = 'block';"),
+]
+n = sum(s.count(a) for a, _ in subs)
+if n == 0:
+    print("QuestCommon.js already patched")
+else:
+    for a, b in subs:
+        s = s.replace(a, b)
+    p.write_text(s)
+    print(f"patched QuestCommon.js ({n} quest lists now actually shown)")
 PY
