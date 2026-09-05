@@ -89,7 +89,7 @@ let _original = null;
 Stylist.init = function init() {
 	const root = this.getRoot();
 
-	this.draggable(root.querySelector('.titlebar'));
+	this.draggable('.titlebar');
 
 	root.querySelector('.titlebar .close').addEventListener('click', () => {
 		revert();
@@ -126,8 +126,15 @@ Stylist.onAppend = function onAppend() {
 		_original[look.prop] = entity ? entity[look.prop] | 0 : 0;
 	});
 
-	this.getRoot().style.left = Math.min(Math.max(0, _preferences.x), Renderer.width - 230) + 'px';
-	this.getRoot().style.top = Math.min(Math.max(0, _preferences.y), Renderer.height - 208) + 'px';
+	// `_host`, not `getRoot()`: getRoot() hands back the ShadowRoot, which has
+	// no style of its own. Setting `.style.left` on it throws inside append(),
+	// which leaves the component half-attached and -- because onKeyDown was
+	// then live -- eating the Escape that would have got the player out.
+	const host = this._host;
+	host.style.left =
+		Math.min(Math.max(0, _preferences.x), Renderer.width - host.offsetWidth) + 'px';
+	host.style.top =
+		Math.min(Math.max(0, _preferences.y), Renderer.height - host.offsetHeight) + 'px';
 
 	refresh();
 };
@@ -138,9 +145,8 @@ Stylist.onAppend = function onAppend() {
 Stylist.onRemove = function onRemove() {
 	revert();
 
-	const root = this.getRoot();
-	_preferences.x = parseInt(root.style.left, 10) || 0;
-	_preferences.y = parseInt(root.style.top, 10) || 0;
+	_preferences.x = parseInt(this._host.style.left, 10) || 0;
+	_preferences.y = parseInt(this._host.style.top, 10) || 0;
 	_preferences.save();
 
 	// Tell the server the window is gone, so it stops considering the stylist
@@ -155,6 +161,12 @@ Stylist.onRemove = function onRemove() {
  * Escape closes it, like every other window
  */
 Stylist.onKeyDown = function onKeyDown(event) {
+	// A component that failed to append must not hold the keyboard hostage.
+	// Escape is how a stuck player gets back to character select, and that is
+	// exactly the moment it has to work.
+	if (!this._host || this._host.style.display === 'none') {
+		return true;
+	}
 	if (event.which === 27 || event.key === 'Escape') {
 		revert();
 		this.remove();
