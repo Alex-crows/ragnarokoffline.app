@@ -85,7 +85,7 @@ jobs:
       - name: Build rAthena
         run: |
           set -e
-          git clone --depth 1 https://github.com/rathena/rathena.git /tmp/rathena
+          ./scripts/vendor-fetch.sh rathena /tmp/rathena
           ./scripts/apply-server-mods.sh /tmp/rathena
           cp containers/rathena/Dockerfile /tmp/rathena/Dockerfile.ragnarokmac
           docker build -f /tmp/rathena/Dockerfile.ragnarokmac \
