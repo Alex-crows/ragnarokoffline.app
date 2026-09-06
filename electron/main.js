@@ -2264,6 +2264,27 @@ function flushClientStorage() {
 	}
 }
 
+// Ask the game page to write its window layout before the process ends.
+//
+// roBrowser saves each window's position and size in that component's
+// onRemove hook and nowhere else, so the layout reaches localStorage only
+// when something removes the components -- a return to character select, or
+// the page going away. Quitting from inside the game does neither: this
+// process exits and takes the renderer with it, and nothing was ever written.
+// The client exposes roPersistUI for exactly this call.
+//
+// Fire-and-forget on purpose. It runs in the renderer while the stack is
+// still being torn down, which takes long enough for the write to land, and
+// the flush before exit is what puts it on disk.
+function persistClientUi() {
+	for (const win of BrowserWindow.getAllWindows()) {
+		if (win.isDestroyed()) continue;
+		win.webContents
+			.executeJavaScript('window.roPersistUI && window.roPersistUI(), 0')
+			.catch(() => {});
+	}
+}
+
 app.on('before-quit', e => {
 	if (tearingDown) return; // second pass: let it go
 	e.preventDefault();
@@ -2271,8 +2292,16 @@ app.on('before-quit', e => {
 	for (const win of BrowserWindow.getAllWindows()) {
 		if (!win.isDestroyed()) win.setTitle(`${productName()} — shutting down…`);
 	}
-	flushClientStorage();
-	teardownAsync().finally(() => app.exit(0));
+	// Order matters: ask the page to write its layout, let the teardown run
+	// (which is what gives that write time to happen), and only then flush and
+	// exit. Flushing first would commit a localStorage that does not yet have
+	// the layout in it.
+	persistClientUi();
+	saveTrackedWindows();
+	teardownAsync().finally(() => {
+		flushClientStorage();
+		app.exit(0);
+	});
 });
 
 app.on('window-all-closed', () => app.quit());
@@ -2283,8 +2312,9 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
 	process.on(sig, () => {
 		if (!tearingDown) {
 			tearingDown = true;
-			flushClientStorage();
+			persistClientUi();
 			teardownSync();
+			flushClientStorage();
 		}
 		process.exit(0);
 	});
