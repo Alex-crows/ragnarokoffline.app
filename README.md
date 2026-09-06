@@ -72,14 +72,18 @@ screen, type your username with **`_M`** or **`_F`** on the end, pick a
 password, and press Login:
 
 ```
-myname_M     ← male          myname_F     ← female
+myname_M
 ```
 
-The account is created and you are logged straight in — there is no separate
+The suffix is only how you ask the server to make the account. It is not part of
+the name and it does not decide anything about your characters — either letter
+works, and you still pick each character's gender and appearance when you create
+it.
+
+The account is created and you are logged straight in; there is no separate
 sign-up step and nothing to confirm. **From then on you log in as `myname`,
-without the suffix.** The letter only sets the account's gender at registration;
-it is not part of the name. Both the name and the password need at least four
-characters, counted without the suffix.
+without the suffix.** Both the name and the password need at least four
+characters, counted without it.
 
 Ordinary accounts have almost no `@` commands — rAthena keeps `@autoloot` and
 `@showexp` for GMs. Settings → Mods → **player-commands** hands them to
