@@ -10,7 +10,7 @@
 // sprites render doubled on WebKit (roBrowserLegacy #1350). One engine
 // everywhere is worth ~60 MB of download.
 //
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, screen, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -1185,13 +1185,107 @@ function productName() {
 
 const windows = {};
 
+// Where a window was last left. The game window is the only one worth
+// remembering -- setup is fixed-size and settings is a dialog -- but the store
+// is keyed by window id so adding another is a one-line change.
+//
+// It lives beside settings.json rather than in the Chromium profile: this is
+// the shell's own state, and a player clearing the client's cache to fix a
+// stale mod should not also lose the size of their window.
+function windowStatePath() {
+	return path.join(stateDir(), 'window.json');
+}
+
+function readWindowState(id) {
+	try {
+		const all = JSON.parse(fs.readFileSync(windowStatePath(), 'utf8'));
+		const st = all && all[id];
+		if (!st || typeof st.width !== 'number' || typeof st.height !== 'number') return null;
+		return st;
+	} catch {
+		return null;
+	}
+}
+
+// A saved position is only usable if it still lands on a display that exists.
+// Unplugging the monitor a window was left on, or a resolution change, would
+// otherwise reopen it somewhere the player cannot reach it. Size is kept
+// either way; only the position is dropped.
+function usableWindowState(st) {
+	if (!st) return null;
+	const out = { width: st.width, height: st.height, maximized: !!st.maximized };
+	if (typeof st.x !== 'number' || typeof st.y !== 'number') return out;
+	const visible = screen.getAllDisplays().some(d => {
+		const b = d.workArea;
+		return st.x < b.x + b.width && st.x + st.width > b.x && st.y < b.y + b.height && st.y + st.height > b.y;
+	});
+	if (visible) {
+		out.x = st.x;
+		out.y = st.y;
+	}
+	return out;
+}
+
+function saveWindowState(id, win) {
+	if (!win || win.isDestroyed()) return;
+	try {
+		let all = {};
+		try {
+			all = JSON.parse(fs.readFileSync(windowStatePath(), 'utf8')) || {};
+		} catch {
+			all = {};
+		}
+		// getNormalBounds, not getBounds: a maximized window reports the screen,
+		// and restoring that would leave nothing to un-maximize back to.
+		all[id] = { ...win.getNormalBounds(), maximized: win.isMaximized() };
+		fs.mkdirSync(stateDir(), { recursive: true });
+		fs.writeFileSync(windowStatePath(), JSON.stringify(all, null, 2));
+	} catch {
+		// Losing the window size is not worth failing a quit over.
+	}
+}
+
+// Windows whose geometry is remembered, so quitting can write them even when
+// no `close` event is coming -- see saveTrackedWindows.
+const trackedWindows = new Map();
+
+// Resize and move fire continuously while dragging, so the write is debounced.
+// `close` writes immediately, because the debounce timer would not survive it.
+function trackWindowState(id, win) {
+	let timer = null;
+	const later = () => {
+		clearTimeout(timer);
+		timer = setTimeout(() => saveWindowState(id, win), 400);
+	};
+	for (const ev of ['resize', 'move', 'maximize', 'unmaximize']) win.on(ev, later);
+	win.on('close', () => {
+		clearTimeout(timer);
+		saveWindowState(id, win);
+	});
+	trackedWindows.set(id, win);
+	win.on('closed', () => trackedWindows.delete(id));
+}
+
+// Quitting from the menu ends at app.exit and a signal ends at process.exit;
+// neither closes the windows first, so `close` never fires and the last
+// geometry would be lost. Clicking the red button does fire it -- this is for
+// the other two ways out.
+function saveTrackedWindows() {
+	for (const [id, win] of trackedWindows) saveWindowState(id, win);
+}
+
 function makeWindow(id, file, opts) {
 	if (windows[id] && !windows[id].isDestroyed()) {
 		windows[id].focus();
 		return windows[id];
 	}
+	// A remembered size and position wins over the defaults the caller passes.
+	const saved = opts && opts.rememberBounds ? usableWindowState(readWindowState(id)) : null;
+	const { rememberBounds, ...winOpts } = opts || {};
 	const win = new BrowserWindow({
-		...opts,
+		...winOpts,
+		...(saved ? { width: saved.width, height: saved.height } : {}),
+		...(saved && typeof saved.x === 'number' ? { x: saved.x, y: saved.y } : {}),
 		webPreferences: {
 			preload: path.join(__dirname, 'preload.js'),
 			contextIsolation: true,
@@ -1243,6 +1337,8 @@ function makeWindow(id, file, opts) {
 	// the host's own client, served over HTTP, not a local copy of it.
 	if (opts && opts.url) win.loadURL(opts.url);
 	else win.loadFile(path.join(__dirname, '..', 'src', file));
+	if (saved && saved.maximized) win.maximize();
+	if (opts && opts.rememberBounds) trackWindowState(id, win);
 	win.on('closed', () => delete windows[id]);
 	windows[id] = win;
 	return win;
@@ -1326,7 +1422,7 @@ function gameTitle() {
 // nothing to act on. Where it navigates *to* is decided in launch_game.
 const openGame = () => {
 	const c = getClientPaths();
-	const win = makeWindow('game', 'index.html', { width: 1280, height: 800, title: gameTitle() });
+	const win = makeWindow('game', 'index.html', { width: 1280, height: 800, title: gameTitle(), rememberBounds: true });
 	// Also on an existing window: makeWindow only applies the title when it
 	// creates one, and the whole point is that this changes when you switch.
 	if (win && !win.isDestroyed()) win.setTitle(gameTitle());
@@ -2152,6 +2248,22 @@ app.whenReady().then(() => {
 // in the background, and only then really exits. Without the cancel, Electron
 // tears the process down while `stack.sh down` is still running and leaves four
 // containers and a microVM behind.
+// DOMStorage is written lazily: Chromium batches it and commits on its own
+// schedule. Both exits below are immediate -- app.exit skips the normal quit
+// path and process.exit skips Electron entirely -- so anything the player
+// changed in the last seconds before quitting was still in memory and went
+// with it. That is the whole of "it forgets my volume and where I put the
+// windows": roBrowser saves those to localStorage the moment they change, and
+// the save simply never reached disk.
+function flushClientStorage() {
+	saveTrackedWindows();
+	try {
+		session.defaultSession.flushStorageData();
+	} catch {
+		// Best effort; never worth failing a quit over.
+	}
+}
+
 app.on('before-quit', e => {
 	if (tearingDown) return; // second pass: let it go
 	e.preventDefault();
@@ -2159,6 +2271,7 @@ app.on('before-quit', e => {
 	for (const win of BrowserWindow.getAllWindows()) {
 		if (!win.isDestroyed()) win.setTitle(`${productName()} — shutting down…`);
 	}
+	flushClientStorage();
 	teardownAsync().finally(() => app.exit(0));
 });
 
@@ -2170,6 +2283,7 @@ for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
 	process.on(sig, () => {
 		if (!tearingDown) {
 			tearingDown = true;
+			flushClientStorage();
 			teardownSync();
 		}
 		process.exit(0);
