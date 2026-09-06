@@ -4,10 +4,13 @@ A single, self-contained app that runs Ragnarok Online offline: server, client
 and game window in one icon.
 
 - **[README](https://github.com/Flux159/ragnarokoffline.app#readme)** — download,
-  assets, first launch, playing with friends on your LAN, and troubleshooting.
+  assets, first launch, and playing with friends on your LAN.
 
 ## Guides
 
+- **[Troubleshooting](TROUBLESHOOTING.md)** — the things people have actually
+  hit: Windows blocking the app, a client folder on the wrong drive, the virtual
+  machine refusing to start, and moving your characters to another machine.
 - **[Modding](MODDING.md)** — a mod is a folder. Change the world's numbers, add
   NPCs and quests, replace the login and loading screens, build a map that is
   in nobody's GRF, and decide where new characters wake up.
