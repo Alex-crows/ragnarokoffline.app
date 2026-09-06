@@ -52,10 +52,6 @@ equip, you look like a GM.
 screen, type your username with **`_M`** or **`_F`** on the end, pick a
 password, and press Login:
 
-```
-myname_M
-```
-
 The suffix is only how you ask the server to make the account. It is not part of
 the name and it does not decide anything about your characters — either letter
 works, and you still pick each character's gender and appearance when you create
