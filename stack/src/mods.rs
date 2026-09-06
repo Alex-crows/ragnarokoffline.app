@@ -367,6 +367,24 @@ pub struct Installed {
     pub bundled: bool,
 }
 
+impl Installed {
+    /// Whether this mod decides what commands players may use.
+    ///
+    /// `groups.yml` and `atcommands.yml` are the two files a mod may supply
+    /// whole, and between them they say which atcommands each player group
+    /// gets. That is a bigger grant than the rest of the conf allowlist, and
+    /// it is not visible in a description the mod wrote about itself -- so the
+    /// Settings window says it, next to the checkbox, rather than the player
+    /// finding out by being surprised later.
+    ///
+    /// Read from the folder rather than from an assembled layer, because the
+    /// list is drawn for mods that are switched *off* too, and nothing has
+    /// been assembled for those.
+    pub fn grants_commands(&self) -> bool {
+        CONF_WHOLE_FILE.iter().any(|f| self.dir.join("conf").join(f).is_file())
+    }
+}
+
 /// Every mod folder, in merge order, with its manifest checked.
 ///
 /// The single place that decides what is applied. `assemble`, `list` and the
@@ -761,7 +779,7 @@ fn one_line(s: &str) -> String {
     s.replace(['\t', '\n', '\r'], " ")
 }
 
-pub fn list(cfg: &Config) -> Vec<[String; 7]> {
+pub fn list(cfg: &Config) -> Vec<[String; 8]> {
     scan(cfg)
         .into_iter()
         .map(|m| {
@@ -770,6 +788,7 @@ pub fn list(cfg: &Config) -> Vec<[String; 7]> {
                 Status::Off => ("off", String::new()),
                 Status::Refused(r) => ("refused", r.clone()),
             };
+            let grants = m.grants_commands();
             [
                 state.to_string(),
                 one_line(&m.name),
@@ -778,6 +797,9 @@ pub fn list(cfg: &Config) -> Vec<[String; 7]> {
                 if m.bundled { "bundled" } else { "installed" }.to_string(),
                 one_line(&m.manifest.version),
                 one_line(&m.manifest.author),
+                // Last, so an older shell that splits off the first seven
+                // fields reads exactly what it did before.
+                if grants { "grants-commands" } else { "" }.to_string(),
             ]
         })
         .collect()
@@ -897,6 +919,62 @@ mod tests {
         read_conf(&d, "x", &mut out);
         let got = out.get("char_conf.txt").unwrap();
         assert_eq!(got, &vec![("start_point".into(), "my_town,50,50".into())]);
+    }
+
+    /// groups.yml is copied whole rather than filtered through the key
+    /// allowlist. Worth pinning: read line by line it would be discarded
+    /// entirely -- "Header:" and "Body:" are not `key: value` settings the
+    /// allowlist knows -- and the mod would look installed and do nothing.
+    #[test]
+    fn groups_yml_is_taken_whole_rather_than_key_by_key() {
+        let d = tmp("whole");
+        fs::create_dir_all(d.join("conf")).unwrap();
+        let body = "Header:\n  Type: PLAYER_GROUP_DB\n  Version: 1\n\nBody:\n  - Id: 0\n    Commands:\n      autoloot: true\n";
+        fs::write(d.join("conf/groups.yml"), body).unwrap();
+        // An ordinary conf file alongside it still goes through the allowlist.
+        fs::write(d.join("conf/char_conf.txt"), "start_point: my_town,50,50\n").unwrap();
+
+        let mut out = BTreeMap::new();
+        read_conf(&d, "x", &mut out);
+
+        let whole = out.get("file:groups.yml").expect("groups.yml is recorded as a whole file");
+        assert_eq!(whole, &vec![("x".to_string(), body.to_string())]);
+        assert!(out.get("groups.yml").is_none(), "it must not also be parsed as settings");
+        assert_eq!(
+            out.get("char_conf.txt").unwrap(),
+            &vec![("start_point".to_string(), "my_town,50,50".to_string())]
+        );
+    }
+
+    /// A whole-file conf layer is a permission grant, and the Settings window
+    /// only labels it because `list` reports it. Pinned in both directions:
+    /// missing the label on a mod that writes groups.yml hides the grant, and
+    /// showing it on an ordinary mod teaches players to ignore it.
+    #[test]
+    fn a_mod_that_writes_groups_yml_is_reported_as_granting_commands() {
+        let plain = tmp("grants-plain");
+        fs::create_dir_all(plain.join("conf")).unwrap();
+        fs::write(plain.join("conf/battle_conf.txt"), "base_exp_rate: 200\n").unwrap();
+        let m = Installed {
+            name: "plain".into(),
+            dir: plain,
+            status: Status::Off,
+            manifest: Manifest::default(),
+            bundled: true,
+        };
+        assert!(!m.grants_commands(), "an ordinary conf layer is not a command grant");
+
+        let granting = tmp("grants-groups");
+        fs::create_dir_all(granting.join("conf")).unwrap();
+        fs::write(granting.join("conf/groups.yml"), "Header:\n  Type: PLAYER_GROUP_DB\n").unwrap();
+        let m = Installed {
+            name: "granting".into(),
+            dir: granting,
+            status: Status::Off,
+            manifest: Manifest::default(),
+            bundled: true,
+        };
+        assert!(m.grants_commands(), "groups.yml decides what commands players get");
     }
 
     #[test]

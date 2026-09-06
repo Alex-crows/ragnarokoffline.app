@@ -1527,7 +1527,7 @@ const handlers = {
 		// the app would not run it, and the difference is the whole point of
 		// having a reason to show.
 		return out.split('\n').filter(Boolean).map(l => {
-			const [state, name, description, reason, origin, version, author] = l.split('\t');
+			const [state, name, description, reason, origin, version, author, grants] = l.split('\t');
 			return {
 				name,
 				enabled: state === 'on',
@@ -1537,6 +1537,10 @@ const handlers = {
 				bundled: origin === 'bundled',
 				version: version || '',
 				author: author || '',
+				// Supplies groups.yml or atcommands.yml, so it decides what
+				// commands players get. Said next to the checkbox because a
+				// mod's own description is not a trustworthy place to learn it.
+				grantsCommands: grants === 'grants-commands',
 			};
 		});
 	},
