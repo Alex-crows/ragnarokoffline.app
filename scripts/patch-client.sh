@@ -563,4 +563,61 @@ else:
     p.write_text(s)
     print("patched DBManager.js (accessory/robe names stay EUC-KR bytes)")
 
+# 0011 - The window layout is never written unless something removes the
+# windows first.
+#
+# Every component saves its position, size and open/closed state in its
+# onRemove hook -- InventoryCommon, EquipmentCommon and the rest all do it
+# there, and nowhere else. onRemove runs when UIManager tears the components
+# down, which happens on a return to character select and on nothing else.
+#
+# So quitting from inside the game never wrote the layout at all: the process
+# ends, the renderer goes with it, and the values were still only in the
+# components. It reads as "it forgot where I put my windows", and it is not a
+# flushing problem -- there was nothing in localStorage to flush. Volume
+# survives the same quit because Audio preferences are saved as they change.
+#
+# pagehide covers a browser tab and any normal navigation. The desktop shell
+# exits the process outright, which fires no page event at all, so the same
+# work is exposed for it to call before it starts tearing the stack down.
+p = rb / "src/App/Online.js"
+s = p.read_text()
+if "roPersistUI" in s:
+    print("Online.js already patched")
+else:
+    old = """import GameEngine from 'Engine/GameEngine.js';
+import Plugins from 'Plugins/PluginManager.js';"""
+    new = """import GameEngine from 'Engine/GameEngine.js';
+import Plugins from 'Plugins/PluginManager.js';
+import UIManager from 'UI/UIManager.js';"""
+    if s.count(old) != 1:
+        sys.exit("Online.js: imports no longer match; re-check the patch")
+    s = s.replace(old, new, 1)
+
+    old = """	window.onbeforeunload = function () {
+		return 'Are you sure to exit roBrowser ?';
+	};"""
+    new = """	window.onbeforeunload = function () {
+		return 'Are you sure to exit roBrowser ?';
+	};
+
+	// Components write their layout in onRemove and nowhere else, so the
+	// layout only survives if something removes them. Nothing does when the
+	// page simply goes away.
+	const persistUI = function () {
+		try {
+			UIManager.removeComponents();
+		} catch (e) {
+			console.warn('could not save the window layout', e);
+		}
+	};
+	window.addEventListener('pagehide', persistUI);
+	// For a host that ends the process without a page event of any kind.
+	window.roPersistUI = persistUI;"""
+    if s.count(old) != 1:
+        sys.exit("Online.js: onbeforeunload no longer matches; re-check the patch")
+    s = s.replace(old, new, 1)
+    p.write_text(s)
+    print("patched Online.js (save the window layout when the page goes away)")
+
 PY
