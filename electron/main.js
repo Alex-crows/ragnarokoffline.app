@@ -2137,6 +2137,9 @@ function buildMenu() {
 // ---------------------------------------------------------------------------
 
 let tearingDown = false;
+// Set when a launch arrives while we are quitting: see the second-instance
+// handler. Guarded because two clicks must not queue two copies.
+let relaunchQueued = false;
 
 function stackEnv() {
 	const root = projectRoot();
@@ -2197,6 +2200,53 @@ function teardownSync() {
 // "name" field, which is the old project identifier, and every platform that
 // draws an application menu labels it with that.
 app.setName(productName());
+
+// One copy at a time. Two are not merely redundant: both drive the same
+// microVM and the same containers, and both own the same Chromium profile.
+// A player who quits and relaunches straight away gets exactly that, because
+// quitting is not instant -- the first copy is still stopping the stack, and
+// the second one starts on top of it. The report that made this obvious was
+// "it forgot my volume and where I put my windows": the second copy read
+// localStorage before the first had flushed it, then wrote its own stale view
+// back over it on the way out.
+//
+// The database pays a higher price. Two supervisors racing over one data disk
+// is how a MariaDB volume ends up with a redo log it cannot recover
+// ("Missing FILE_CHECKPOINT"), which no amount of restarting or repairing
+// fixes -- the characters are simply gone.
+//
+// app.exit, not app.quit: quit would run before-quit in the *second* copy,
+// and its teardown would stop the stack the first copy is still using.
+if (!app.requestSingleInstanceLock()) {
+	app.exit(0);
+} else {
+	app.on('second-instance', () => {
+		// Quitting is not instant -- the stack takes the better part of a
+		// minute to stop -- and this copy holds the lock for all of it. A
+		// player who closes the game and opens it again straight away would
+		// otherwise get nothing at all: no window, no error, no clue that
+		// anything happened, because the launch they just made ended in a
+		// process that exited on the spot. They click again, and again, and
+		// eventually one lands after this copy is gone.
+		//
+		// So take the click as what it plainly means and come back on our own
+		// once the teardown is finished. app.relaunch only queues it; the
+		// exit already scheduled is what carries it out.
+		if (tearingDown) {
+			if (!relaunchQueued) {
+				relaunchQueued = true;
+				app.relaunch();
+			}
+			return;
+		}
+		// Otherwise it is "show me the game", and the window already exists.
+		const win = windows.game || BrowserWindow.getAllWindows()[0];
+		if (win && !win.isDestroyed()) {
+			if (win.isMinimized()) win.restore();
+			win.focus();
+		}
+	});
+}
 
 app.whenReady().then(() => {
 	// Before anything reads a path: an existing install still has its data
