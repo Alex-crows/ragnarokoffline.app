@@ -112,9 +112,32 @@ every status says it worked.
 - `cd stack && cargo test` — the supervisor's suite.
 - `node --check electron/main.js` after touching the shell.
 - `npm start` runs the app from source against the *same* state directory as
-  the packaged build, which is the quickest way to test a shell change.
+  the packaged build, which is still the quickest way to test a shell change —
+  **but quit the packaged app first, and let it finish quitting.** The app
+  takes a single-instance lock, keyed on Electron's `userData`, and both builds
+  resolve that to `Application Support/Ragnarok Offline`. Neither way it fails
+  prints anything, so learn to recognise them:
+  - packaged app *running*: `npm start` exits 0 on the spot and the packaged
+    window comes to the front. Nothing is wrong with your build.
+  - packaged app *still quitting*: the teardown holds the lock for the whole
+    of `stack down`, and a launch arriving during it is read as "bring the app
+    back" — it queues a relaunch, so the **packaged** build reappears and your
+    dev run is gone. Wait for it to leave the Dock.
+- One copy at a time, and not only because of the lock: the ports are fixed
+  (3338 for assets, 6900/6121/5121 for rAthena), so giving a second copy its
+  own state with `RAGNAROK_OFFLINE_HOME` still collides — and two supervisors
+  over one data disk is how the MariaDB volume loses its redo log.
+  `--user-data-dir` gets past the lock but not the ports, so it is only worth
+  anything for shell work that never presses play.
 - Killing things: `pgrep -x` and kill by PID. `pkill -f <pattern>` has matched
   the agent's own shell in this repo and killed the session.
+
+Check the vendor checkouts are on their pins before you trust a local result:
+`scripts/vendor-fetch.sh <name> vendor/<name>` puts one back, and prints
+`already at <sha>` when it was fine. Nothing warns you otherwise, and a drifted
+`vendor/roBrowserLegacy` means `patch-client.sh` is patching a tree the release
+never builds — the CI job clones the `config/VENDOR_PINS` commit fresh every
+time, so a patch anchor that matches locally can still fail there.
 
 The build workflow triggers on `v*` tags and manual dispatch only — **there are
 no PR checks**, so local verification is all there is.
