@@ -43,30 +43,20 @@ server and drops you at the login screen.
 Log in with **`ragnarok`** / **`ragnarok`** — the account is created for you on
 first run — and make a character.
 
-**`ragnarok` is a GM account.** That is usually what you want on your own
-server: it can use every `@` command. The catch is that the client draws a GM in
-a fixed operator outfit instead of your character's own body, so whatever you
-equip, you look like a GM.
+**`ragnarok` is a GM account.** It can use every `@` command including warping. 
+With GM accounts your outfit generally always looks like a GM, so if you don't want that create your own non-GM account.
 
 **To play as an ordinary character, make your own account.** On the login
-screen, type your username with **`_M`** or **`_F`** on the end, pick a
-password, and press Login:
-
-The suffix is only how you ask the server to make the account. It is not part of
-the name and it does not decide anything about your characters — either letter
-works, and you still pick each character's gender and appearance when you create
-it.
-
-The account is created and you are logged straight in; there is no separate
-sign-up step and nothing to confirm. **From then on you log in as `myname`,
-without the suffix.** Both the name and the password need at least four
-characters, counted without it.
+screen, type your username with **`_M`** or **`_F`** suffix on the end, pick a
+password, and press Login (example: `flux159_M` as the username). Note that it
+doesn't matter if you pick `_M` or `_F`, you are still able to create male and
+female characters after logging in. After your first account creation, you can 
+login as `myname`  without the suffix. Both the name and the password need at least four characters.
 
 Ordinary accounts have almost no `@` commands — rAthena keeps `@autoloot` and
-`@showexp` for GMs. Settings → Mods → **player-commands** hands them to
-everybody.
+`@showexp` for GMs. Settings → Mods → **player-commands** gives player characters some common commands.
 
-First launch takes a few minutes: it unpacks the runtime, boots the microVM, loads
+The first launch takes a few minutes: it unpacks the runtime, boots the microVM, loads
 the container images and initialises the database. The window names each step as it
 goes, so you can see where it is. Every launch after that is seconds.
 
