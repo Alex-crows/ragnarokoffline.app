@@ -14,25 +14,6 @@ the assets. macOS, Linux and Windows.
 read [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md). Bugs and feature
 requests are welcome as [issues](../../issues).
 
----
-
-> [!IMPORTANT]
-> **Two things to know on Windows.**
->
-> **1. Windows may block the app from starting.** Our files are not code-signed
-> yet, so on a newer Windows 11 install Smart App Control refuses to run them —
-> from 1.0.2 the app says so directly, with the error *"An Application Control
-> policy has blocked this file"*. If you hit it, read
-> [this troubleshooting entry](docs/TROUBLESHOOTING.md#windows-an-application-control-policy-has-blocked-this-file)
-> before changing anything. Signing is in process ([#8](../../issues/8)).
->
-> **2. Close kernel-level anti-cheat before starting.** Riot Vanguard
-> (Valorant, League of Legends) and similar always-on anti-cheat drivers load at
-> boot and take exclusive control of the hypervisor. Running one alongside this
-> app has put at least one machine into a **reboot loop**. Fully exit the game
-> and its anti-cheat service — or reboot without it — before launching. Faceit,
-> ESEA and EasyAntiCheat's kernel mode are likely to behave the same way.
-
 ## Getting started
 
 **[Watch the setup walkthrough](https://youtu.be/1Ib_KqHDCLA)** — download,
