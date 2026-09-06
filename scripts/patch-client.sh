@@ -471,6 +471,98 @@ else:
     p.write_text(s)
     print(f"patched QuestCommon.js ({n} quest lists now actually shown)")
 
+# 0008 - Hats and garments stop rendering once their name comes from a lua
+# name table.
+#
+# Every sprite request 404s with a path whose directory is EUC-KR
+# ("data/sprite/\xbe\xc7\xbc\xbc\xbb\xe7\xb8\xae/...") but whose item-name tail is
+# Unicode Hangul, so the two halves cannot both be right and the file is never
+# found. The asset server does exactly what it should -- it has no such file --
+# and missing-files.log names it.
+#
+# loadLuaTable() decodes every value with the user charpage. That is correct
+# for display tables (job names, skill descriptions), but accname.lub and
+# spriterobename.lub do not hold display text: their values are GRF filenames.
+# getHatPath()/getRobePath() concatenate them onto an EUC-KR byte-string
+# prefix, so they have to stay bytes -- which is exactly what itemInfo's
+# AddItem already does for identifiedResourceName, decoding it without a
+# charpage.
+#
+# The tables are module singletons that outlive a relogin without a page
+# reload, which is why the headgear vanished only after relogging and came
+# back on F5 -- and why the symptom reads as "hats not appearing until server
+# restart".
+p = rb / "src/DB/DBManager.js"
+s = p.read_text()
+if "isResourceTable" in s:
+    print("DBManager.js resource names already patched")
+else:
+    subs = [
+        (
+"""function loadLuaTable(file_list, table_name, callback, onEnd, contextFunc) {""",
+"""function loadLuaTable(file_list, table_name, callback, onEnd, contextFunc, isResourceTable = false) {""",
+        ),
+        (
+"""			ctx.addKeyAndValueToTable = (key, value) => {
+				table[key] = userStringDecoder.decode(value, userCharpage);
+				return 1;
+			};""",
+"""			ctx.addKeyAndValueToTable = (key, value) => {
+				// Resource-name tables (accname, robename) hold GRF sprite filenames, not
+				// display text. They must stay as raw EUC-KR byte-strings so the paths built
+				// in getHatPath/getRobePath match the files -- decoding with the charpage
+				// turns them into Unicode Hangul and every sprite request 404s. Display
+				// tables (job names, skill descriptions...) still decode with the charpage.
+				table[key] = userStringDecoder.decode(value, isResourceTable ? null : userCharpage);
+				return 1;
+			};""",
+        ),
+        (
+"""			loadLuaTable(
+				[DB.LUA_PATH + 'datainfo/accessoryid.lub', DB.LUA_PATH + 'datainfo/accname.lub'],
+				'AccNameTable',
+				function (json) {
+					Object.assign(HatTable, json);
+				},
+				onLoad()
+			);
+			loadLuaTable(
+				[DB.LUA_PATH + 'datainfo/spriterobeid.lub', DB.LUA_PATH + 'datainfo/spriterobename.lub'],
+				'RobeNameTable',
+				function (json) {
+					Object.assign(RobeTable, json);
+				},
+				onLoad()
+			);""",
+"""			loadLuaTable(
+				[DB.LUA_PATH + 'datainfo/accessoryid.lub', DB.LUA_PATH + 'datainfo/accname.lub'],
+				'AccNameTable',
+				function (json) {
+					Object.assign(HatTable, json);
+				},
+				onLoad(),
+				null,
+				true
+			);
+			loadLuaTable(
+				[DB.LUA_PATH + 'datainfo/spriterobeid.lub', DB.LUA_PATH + 'datainfo/spriterobename.lub'],
+				'RobeNameTable',
+				function (json) {
+					Object.assign(RobeTable, json);
+				},
+				onLoad(),
+				null,
+				true
+			);""",
+        ),
+    ]
+    for old, new in subs:
+        if s.count(old) != 1:
+            sys.exit("DBManager.js: resource-name anchor no longer matches (%d hits); re-check the patch" % s.count(old))
+        s = s.replace(old, new, 1)
+    p.write_text(s)
+    print("patched DBManager.js (accessory/robe names stay EUC-KR bytes)")
+
 # 0011 - The window layout is never written unless something removes the
 # windows first.
 #
