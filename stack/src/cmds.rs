@@ -1022,6 +1022,13 @@ fn app_control_help(reason: &str) -> String {
 /// that is worse than saying nothing: it contradicts a correct diagnosis the
 /// player is looking straight at, and sends them to reboot into firmware for a
 /// problem that is a config line.
+fn nebula_explained_itself(reason: &str) -> bool {
+    reason.contains("already in use")
+        || reason.contains("port_conflict")
+        || reason.contains("Either:")
+        || reason.contains("cannot share a port")
+}
+
 /// A previous engine that has not finished leaving yet.
 ///
 /// Quitting stops the engine, but stopping it is not instant: the supervisor
@@ -1041,13 +1048,6 @@ fn engine_still_departing(reason: &str) -> bool {
     reason.contains("already running")
         || reason.contains("Connection reset by peer")
         || reason.contains("Broken pipe")
-}
-
-fn nebula_explained_itself(reason: &str) -> bool {
-    reason.contains("already in use")
-        || reason.contains("port_conflict")
-        || reason.contains("Either:")
-        || reason.contains("cannot share a port")
 }
 
 fn engine_failure_help(reason: &str) -> String {
