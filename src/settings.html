@@ -621,6 +621,11 @@ async function refreshMods() {
       + (m.bundled ? ' <span style="color:var(--dim); font-size:11px">included</span>' : '')
       + (by ? ` <span style="color:var(--dim); font-size:11px">${esc(by)}</span>` : '')
       + (m.description ? `<br><span style="color:var(--dim)">${esc(m.description)}</span>` : '')
+      // Not from the mod's own description: a mod that changes what commands
+      // players may use should say so in text the mod did not write.
+      + (m.grantsCommands
+        ? '<br><span style="color:var(--dim)">Changes which commands players can use.</span>'
+        : '')
       + (m.refused
         ? `<br><span style="color:var(--bad, #e5534b)">Not loaded — ${esc(m.reason)}</span>`
         : '');
