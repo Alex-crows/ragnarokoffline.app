@@ -283,7 +283,34 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
         if is_app_control_block(&e) {
             return Err(app_control_help(&e));
         }
-        return Err(engine_failure_help(&e));
+        // Closing the game and opening it again is the ordinary way to hit
+        // this, and the previous engine needs about a minute to finish
+        // leaving. Waiting is the whole remedy, so wait rather than hand the
+        // player a virtualisation error for a stack that is simply busy.
+        let mut last = e;
+        if engine_still_departing(&last) {
+            phase(cfg, "Waiting for the previous engine to stop…");
+            for _ in 0..40 {
+                sleep(Duration::from_secs(2));
+                match nebula(cfg, &["up"]) {
+                    Ok(()) => {
+                        last.clear();
+                        break;
+                    }
+                    Err(again) => {
+                        last = again;
+                        // A different failure is a real one: stop retrying and
+                        // report it now rather than after another 80 seconds.
+                        if !engine_still_departing(&last) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if !last.is_empty() {
+            return Err(engine_failure_help(&last));
+        }
     }
     // Its own phase. Installing the image and waiting for the engine are
     // different steps with very different durations, and leaving the install
@@ -1002,6 +1029,27 @@ fn nebula_explained_itself(reason: &str) -> bool {
         || reason.contains("cannot share a port")
 }
 
+/// A previous engine that has not finished leaving yet.
+///
+/// Quitting stops the engine, but stopping it is not instant: the supervisor
+/// asks the VM to shut down, waits, and only then does nebulad record its exit
+/// and release the run directory. Reopening the app inside that window finds an
+/// engine that is alive enough to refuse a second one ("nebulad already
+/// running") or dying fast enough that the socket goes away mid-request
+/// ("Connection reset by peer", "Broken pipe").
+///
+/// None of that is a fault to report. It is the previous run finishing, and the
+/// only thing to do about it is wait -- which is why the start is retried
+/// rather than explained. It matters that it is not explained: the Linux
+/// fallback below sends the player to their BIOS for it, which is both wrong
+/// and unfixable, and it is the message they actually see when they close the
+/// game and open it straight away.
+fn engine_still_departing(reason: &str) -> bool {
+    reason.contains("already running")
+        || reason.contains("Connection reset by peer")
+        || reason.contains("Broken pipe")
+}
+
 fn engine_failure_help(reason: &str) -> String {
     // Before nebula_explained_itself, deliberately: that returns nebula's own
     // text unchanged for anything it has already diagnosed, and a port
@@ -1024,6 +1072,16 @@ fn engine_failure_help(reason: &str) -> String {
     }
     if nebula_explained_itself(reason) {
         return reason.to_string();
+    }
+    // Only reached after the retries in ensure_engine have run out, so the
+    // previous engine is not merely slow -- it is stuck. Say that, rather than
+    // blaming the hypervisor for it.
+    if engine_still_departing(reason) {
+        return format!(
+            "{reason}\n\n\
+             A previous engine is still running and did not stop on its own. \
+             Repair, in Settings, will stop it and start again."
+        );
     }
     // A missing DLL is not a virtualisation fault, and the hypervisor advice
     // below would send someone into their BIOS for one.
@@ -1845,6 +1903,23 @@ mod tests {
             held[0].home,
             PathBuf::from("/Users/p/Library/Application Support/com.ragnarokmac.app/nebula"),
         );
+    }
+
+    /// The three ways a departing engine shows up, and the one case that must
+    /// not be mistaken for one.
+    ///
+    /// Pinned because getting this wrong is expensive in both directions: too
+    /// narrow and the player is sent to their BIOS for a stack that is merely
+    /// busy, too wide and a genuine failure is retried for eighty seconds
+    /// before it is reported.
+    #[test]
+    fn reads_an_engine_that_is_still_leaving() {
+        assert!(engine_still_departing("nebulad failed to start:\n\nnebulad already running (pid 3093)"));
+        assert!(engine_still_departing("Error: Connection reset by peer (os error 104)"));
+        assert!(engine_still_departing("Error: Broken pipe (os error 32)"));
+        // A hypervisor that is genuinely unavailable is not a wait: retrying
+        // it changes nothing, and the KVM advice is the right answer.
+        assert!(!engine_still_departing("failed to open /dev/kvm: Permission denied"));
     }
 
     /// A path may contain a bracket, so the home ends at the last one on the
