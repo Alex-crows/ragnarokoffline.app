@@ -62,6 +62,29 @@ server and drops you at the login screen.
 Log in with **`ragnarok`** / **`ragnarok`** — the account is created for you on
 first run — and make a character.
 
+**`ragnarok` is a GM account.** That is usually what you want on your own
+server: it can use every `@` command. The catch is that the client draws a GM in
+a fixed operator outfit instead of your character's own body, so whatever you
+equip, you look like a GM.
+
+**To play as an ordinary character, make your own account.** On the login
+screen, type your username with **`_M`** or **`_F`** on the end, pick a
+password, and press Login:
+
+```
+myname_M     ← male          myname_F     ← female
+```
+
+The account is created and you are logged straight in — there is no separate
+sign-up step and nothing to confirm. **From then on you log in as `myname`,
+without the suffix.** The letter only sets the account's gender at registration;
+it is not part of the name. Both the name and the password need at least four
+characters, counted without the suffix.
+
+Ordinary accounts have almost no `@` commands — rAthena keeps `@autoloot` and
+`@showexp` for GMs. Settings → Mods → **player-commands** hands them to
+everybody.
+
 First launch takes a few minutes: it unpacks the runtime, boots the microVM, loads
 the container images and initialises the database. The window names each step as it
 goes, so you can see where it is. Every launch after that is seconds.

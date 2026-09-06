@@ -620,4 +620,64 @@ import UIManager from 'UI/UIManager.js';"""
     p.write_text(s)
     print("patched Online.js (save the window layout when the page goes away)")
 
+# 0010 - Drag and drop onto the equipment window did nothing.
+#
+# Dragging a hat from the inventory onto the character never equipped it. The
+# drag started, the slot highlighted, and the drop was silently ignored --
+# double-clicking the item worked, which is what made it look like a quirk of
+# the equipment window rather than a bug.
+#
+# onDragOver ends with `event.stopImmediatePropagation(); return false;` and
+# never calls preventDefault(). Under the HTML5 drag-and-drop model an element
+# is only a drop target if its dragover handler *cancels* the event, so without
+# it the browser never fires `drop` and onDrop is dead code. `return false`
+# would have done exactly that under jQuery, which treats it as preventDefault
+# plus stopPropagation -- but this is an addEventListener callback, where a
+# falsy return means nothing at all. The handler was correct once and quietly
+# stopped being correct when the binding changed.
+#
+# Every other named dragover handler in roBrowser's component tree calls
+# preventDefault, including SwitchEquip's own onDragOver, which is the same
+# window family. This one is the only one that does not.
+#
+# Anchored on the tail of onDragOver rather than on the two lines themselves:
+# onDragLeave ends identically, and patching that one instead would leave the
+# real bug in place while looking applied.
+p = rb / "src/UI/Components/Equipment/EquipmentCommon.js"
+s = p.read_text()
+if "// preventDefault, not `return false`" in s:
+    print("EquipmentCommon.js drag-and-drop already patched")
+else:
+    old = """					Client.loadFile(DB.INTERFACE_PATH + 'basic_interface/item_invert.bmp', _data => {
+						cells.forEach(c => {
+							c.style.backgroundImage = `url(${_data})`;
+						});
+					});
+				}
+			}
+		}
+		event.stopImmediatePropagation();
+		return false;
+	}"""
+    new = """					Client.loadFile(DB.INTERFACE_PATH + 'basic_interface/item_invert.bmp', _data => {
+						cells.forEach(c => {
+							c.style.backgroundImage = `url(${_data})`;
+						});
+					});
+				}
+			}
+		}
+		// preventDefault, not `return false`: a drop only fires on a target
+		// whose dragover cancelled the event, and a falsy return from an
+		// addEventListener callback cancels nothing. Without this the window
+		// is never a drop target and onDrop below never runs.
+		event.preventDefault();
+		event.stopImmediatePropagation();
+		return false;
+	}"""
+    if s.count(old) != 1:
+        sys.exit("EquipmentCommon.js: onDragOver no longer matches (%d hits); re-check the patch" % s.count(old))
+    p.write_text(s.replace(old, new, 1))
+    print("patched EquipmentCommon.js (drag and drop onto the equipment window)")
+
 PY
