@@ -40,6 +40,10 @@ If you only want to join a friend who is hosting a server, see
 picker: choose the folder you unzipped and it finds the rest. Then it starts the
 server and drops you at the login screen.
 
+The first launch takes a few minutes: it unpacks the runtime, boots the microVM, loads
+the container images and initialises the database. You can see each step as it
+progresses. Every launch after that is ~10-15 seconds.
+
 Log in with **`ragnarok`** / **`ragnarok`** — the account is created for you on
 first run — and make a character.
 
@@ -55,10 +59,6 @@ login as `myname`  without the suffix. Both the name and the password need at le
 
 Ordinary accounts have almost no `@` commands — rAthena keeps `@autoloot` and
 `@showexp` for GMs. Settings → Mods → **player-commands** gives player characters some common commands.
-
-The first launch takes a few minutes: it unpacks the runtime, boots the microVM, loads
-the container images and initialises the database. The window names each step as it
-goes, so you can see where it is. Every launch after that is seconds.
 
 **4. Optional: fill the world with people.** A private server is empty by
 default. Settings → **Population** puts AI characters on the map with you —
