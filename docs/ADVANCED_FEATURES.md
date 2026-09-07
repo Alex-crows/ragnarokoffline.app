@@ -51,6 +51,7 @@ Inside it:
 | `nebula/` | The microVM: guest kernel, container images, and the virtual disks. Nearly all of the size. |
 | `runtime/` | The server runtime — rAthena config, SQL schema, the client. Replaced wholesale by each app update. |
 | `state/` | Generated config, seeded schema, and staged backups. Deliberately outside `runtime/` so an update cannot wipe it. |
+| `state/mods` | Location of mod folders |
 | `client.json` | Which folder your GRFs are in, and whether you are hosting or joining. |
 
 **Your Ragnarok client is not in here.** The GRFs stay wherever you put them and
