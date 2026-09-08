@@ -1384,7 +1384,7 @@ const openGame = () => {
 	return win;
 };
 const openSetup = () => makeWindow('setup', 'setup.html', { width: 620, height: 620, resizable: false, title: `${productName()} — set up your client` });
-const openSettings = () => makeWindow('settings', 'settings.html', { width: 620, height: 780, title: `${productName()} — settings` });
+const openSettings = () => makeWindow('settings', 'settings.html', { width: 650, height: 800, title: `${productName()} — settings` });
 
 
 // ---------------------------------------------------------------------------
