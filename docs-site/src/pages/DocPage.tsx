@@ -143,7 +143,7 @@ export default function DocPage() {
       <nav className="navbar">
         <Link to="/" className="navbar-brand">
           <AppMark size={26} />
-          Ragnarok Offline
+          RagnarokOffline.app
         </Link>
         <div className="navbar-links">
           <a href="https://discord.gg/jUYC9dMbu5" target="_blank" rel="noopener">

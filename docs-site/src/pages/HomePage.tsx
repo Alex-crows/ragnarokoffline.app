@@ -34,7 +34,7 @@ export default function HomePage() {
       <nav className="navbar">
         <Link to="/" className="navbar-brand">
           <AppMark size={26} />
-          Ragnarok Offline
+          RagnarokOffline.app
         </Link>
         <div className="navbar-links">
           <a href="https://discord.gg/jUYC9dMbu5" target="_blank" rel="noopener">
@@ -52,7 +52,7 @@ export default function HomePage() {
           <div className="hero-mark">
             <AppMark size={192} />
           </div>
-          <h1>Your own Ragnarok Online server</h1>
+          <h1>RagnarokOffline.app</h1>
           <p>
             A single ragnarok app for MacOS, Windows, and Linux. Open the app, point to your client
             files, and start playing in Midgard.
