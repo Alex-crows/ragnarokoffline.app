@@ -8,14 +8,16 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct Docker {
     bin: PathBuf,
     nebula_home: PathBuf,
+    state: PathBuf,
 }
 
 /// Storage attached to a container.
@@ -30,8 +32,8 @@ pub enum Mount {
 }
 
 impl Docker {
-    pub fn new(bin: PathBuf, nebula_home: PathBuf) -> Docker {
-        Docker { bin, nebula_home }
+    pub fn new(bin: PathBuf, nebula_home: PathBuf, state: PathBuf) -> Docker {
+        Docker { bin, nebula_home, state }
     }
 
     fn base(&self) -> Command {
@@ -100,6 +102,45 @@ impl Docker {
         self.state(name).as_deref() == Some("running")
     }
 
+    /// Bounded diagnostic reads. Drain both pipes concurrently so a large log
+    /// cannot deadlock the CLI; retain only each stream's tail and cap time.
+    pub fn diagnostic_output(&self, args: &[&str], limit: usize) -> Result<String, String> {
+        let mut child = self.base().args(args).stdin(Stdio::null())
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+            .map_err(|_| "Diagnostic command could not start")?;
+        fn tail(mut input: impl Read, limit: usize) -> std::io::Result<Vec<u8>> {
+            let mut out = std::collections::VecDeque::with_capacity(limit);
+            let mut buffer = [0; 8192];
+            loop {
+                let n = input.read(&mut buffer)?;
+                if n == 0 { break; }
+                for byte in &buffer[..n] {
+                    if out.len() == limit { out.pop_front(); }
+                    out.push_back(*byte);
+                }
+            }
+            Ok(out.into())
+        }
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let output = std::thread::spawn(move || tail(stdout, limit));
+        let errors = std::thread::spawn(move || tail(stderr, limit));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let success = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.success(),
+                Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(20)),
+                _ => { let _ = child.kill(); let _ = child.wait(); break false; }
+            }
+        };
+        let out = output.join().ok().and_then(Result::ok);
+        let err = errors.join().ok().and_then(Result::ok);
+        if !success { return Err("Diagnostic command failed or timed out".into()); }
+        let mut body = String::from_utf8_lossy(&out.ok_or("Diagnostic output unavailable")?).into_owned();
+        body.push_str(&String::from_utf8_lossy(&err.ok_or("Diagnostic output unavailable")?));
+        Ok(body)
+    }
+
     /// Remove every container answering to a name, then wait for the name to be
     /// released.
     ///
@@ -120,6 +161,15 @@ impl Docker {
         }
     }
 
+    pub fn load_bundle(&self, bundle: &Path) -> Result<(), String> {
+        let file = fs::File::open(bundle).map_err(|_| "Cannot open the bundled server images")?;
+        let status = self.base().arg("load").stdin(Stdio::from(file))
+            .stdout(Stdio::null()).stderr(Stdio::null()).status()
+            .map_err(|_| "Cannot run the bundled image loader")?;
+        if !status.success() { return Err("Could not load the bundled server images".into()); }
+        Ok(())
+    }
+
     pub fn image_exists(&self, image: &str) -> bool {
         self.quiet(["image", "inspect", image])
     }
@@ -138,10 +188,92 @@ impl Docker {
         }
     }
 
+    pub fn started_at(&self, name: &str) -> Option<String> {
+        let output = self.output(["inspect", name]).ok()?;
+        let crate::json::Value::Array(containers) = crate::json::parse(&output).ok()? else { return None; };
+        let state = containers.first()?.get("State")?;
+        if state.str("Status") != Some("running") { return None; }
+        state.str("StartedAt").map(str::to_owned)
+    }
+
+    pub fn timestamped_logs(&self, name: &str) -> [String; 2] {
+        match self.base().args(["logs", "-t", "--tail", "400", name]).output() {
+            Ok(output) => [String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned()],
+            Err(_) => [String::new(), String::new()],
+        }
+    }
+
+    fn sql_auth(&self) -> Result<Vec<String>, String> {
+        // Use the recorded RUNNING volume, not a just-edited era preference.
+        let volume = fs::read_to_string(self.state.join(".db-volume")).unwrap_or_default();
+        let era = if volume.trim() == "ragnarokmac-db-prere" { "prerenewal" } else { "renewal" };
+        if crate::service_credentials::load(&self.state, era)?.is_some() {
+            Ok(vec!["--defaults-extra-file=/run/ragnarok-private/database.cnf".into()])
+        } else { Ok(vec!["-uragnarok".into(), "-pragnarok".into()]) }
+    }
+
+    pub fn database_client(&self, binary: &str) -> Result<String, String> {
+        if !["mariadb", "mariadb-dump"].contains(&binary) { return Err("Unsupported database client".into()); }
+        Ok(format!("{binary} {} --protocol=TCP -h127.0.0.1", self.sql_auth()?.join(" ")))
+    }
+
     pub fn exec_sql(&self, sql: &str) -> Result<String, String> {
-        self.output([
-            "exec", "ragnarok-db", "mariadb", "-uragnarok", "-pragnarok", "ragnarok", "-e", sql,
-        ])
+        self.sql(sql, &self.sql_auth()?, true)
+    }
+
+    /// No query or generated password enters argv, logs or raw error text.
+    pub fn private_sql(&self, sql: &str) -> Result<String, String> {
+        self.sql(sql, &self.sql_auth()?, false)
+    }
+
+    pub fn root_sql(&self, sql: &str, legacy: bool) -> Result<String, String> {
+        let auth = if legacy { vec!["-uroot".into(), "-pragnarok".into()] }
+            else { vec!["--defaults-extra-file=/run/ragnarok-private/root.cnf".into()] };
+        self.sql(sql, &auth, false)
+    }
+
+    fn sql(&self, sql: &str, auth: &[String], headers: bool) -> Result<String, String> {
+        self.require_private_sql()?;
+        let failure = || "The private database operation failed. Start the server to finish any pending credential migration, or restore its matching credential journal and backup.".to_string();
+        if sql.len() > 16 * 1024 { return Err(failure()); }
+        let mut args: Vec<String> = ["exec", "-i", "ragnarok-db", "mariadb"].iter().map(|s| s.to_string()).collect();
+        args.extend(auth.iter().cloned());
+        args.extend(["--protocol=TCP", "-h127.0.0.1", "--batch", "--raw"].iter().map(|s| s.to_string()));
+        if !headers { args.push("--skip-column-names".into()); }
+        args.push("ragnarok".into());
+        let mut child = self.base().args(args)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().map_err(|_| failure())?;
+        let mut stdin = child.stdin.take().ok_or_else(failure)?;
+        let input = sql.as_bytes().to_vec();
+        let writer = std::thread::spawn(move || stdin.write_all(&input));
+        let stdout = child.stdout.take().ok_or_else(failure)?;
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.take(64 * 1024 + 1).read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(20)),
+                _ => { let _ = child.kill(); let _ = child.wait(); break None; }
+            }
+        };
+        let wrote = writer.join().ok().and_then(Result::ok).is_some();
+        let bytes = reader.join().ok().and_then(Result::ok).ok_or_else(failure)?;
+        if !wrote || !status.map(|s| s.success()).unwrap_or(false) || bytes.len() > 64 * 1024 {
+            return Err(failure());
+        }
+        String::from_utf8(bytes).map_err(|_| failure())
+    }
+
+    pub fn require_private_sql(&self) -> Result<(), String> {
+        if self.output(["capabilities"]).ok().map(|s| s.lines().any(|l| l == "exec-stdin-eof-v1")).unwrap_or(false) {
+            Ok(())
+        } else {
+            Err("Account settings require an updated bundled docker-slim with exec-stdin-eof-v1 support. Update the app's runtime before changing accounts.".into())
+        }
     }
 
     /// Create, populate and start a container, honouring `Mount` in whatever
@@ -229,8 +361,11 @@ impl Docker {
         // which is exactly where they belong.
         let dest_name = dest.rsplit('/').find(|p| !p.is_empty())
             .ok_or_else(|| format!("destination {dest} has no name"))?;
-        let stage = std::env::temp_dir().join(format!("ro-cp-{}-{}", std::process::id(), dest_name));
-        let _ = fs::remove_dir_all(&stage);
+        crate::private_fs::directory(&self.state)?;
+        let private = self.state.join("private");
+        crate::private_fs::directory(&private)?;
+        let stage = private.join(format!("copy-{}", crate::private_fs::random_hex(12)?));
+        crate::private_fs::directory(&stage)?;
         let staged = stage.join(dest_name);
         copy_dir_all(host, &staged)?;
 

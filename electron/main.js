@@ -10,11 +10,79 @@
 // sprites render doubled on WebKit (roBrowserLegacy #1350). One engine
 // everywhere is worth ~60 MB of download.
 //
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, screen, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, shell, clipboard, screen, session, safeStorage, powerMonitor } = require('electron');
+// Quiet launches mute every window for this run, without persisting a setting.
+if (process.argv.includes('--quiet')) {
+    app.on('web-contents-created', (_event, contents) => contents.setAudioMuted(true));
+}
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, execFile } = require('child_process');
+const { parseJoinAddress, GAME_PATH } = require('./join-address');
+const { probeHost } = require('./host-probe');
+const { JoinSession } = require('./join-session');
+const joinSession = new JoinSession();
+let sharing, sharingSecrets;
+let sharingStartRequest = 0;
+function getSharingSecrets() {
+    return sharingSecrets ||= new (require('./sharing/secrets').SharingSecrets)(path.join(dataRoot(), 'sharing'), safeStorage);
+}
+function getSharing() {
+    return sharing ||= new (require('./sharing/controller').SharingController)({
+        directory: path.join(dataRoot(), 'sharing'),
+        // 0 means "until you stop sharing": the gateway treats an infinite
+        // lifetime as never expiring, and stopping or replacing still revokes.
+        // Reuse the stored invitation so a link already sent to friends keeps
+        // working across a restart, a crash or a Repair. Rotating it is a
+        // deliberate act -- "Create a new link" in Settings.
+        // Everything sharing does, kept on disk so a bug report carries it.
+        // Bounded, because a reconnecting tunnel is chatty.
+        log: message => {
+            const line = `${new Date().toISOString()} ${message}\n`;
+            appLog(`sharing: ${message}`);
+            try {
+                const file = path.join(dataRoot(), 'sharing', 'sharing.log');
+                fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+                if ((fs.statSync(file, { throwIfNoEntry: false })?.size || 0) > 512 * 1024) {
+                    fs.renameSync(file, file + '.1');
+                }
+                fs.appendFileSync(file, line);
+            } catch { /* diagnostics must never break sharing */ }
+        },
+        invite: () => { try { return getSharingSecrets().loadInvite(); } catch { return null; } },
+        onInvite: value => { try { getSharingSecrets().saveInvite(value); } catch { /* no secure store */ } },
+        lifetime: () => {
+            const days = Number(getSettings().sharing_invite_days);
+            if (days === 0) return Infinity;
+            return Math.min(30, Math.max(1, days || 7)) * 24 * 60 * 60 * 1000;
+        },
+        guard: async () => {
+            const client = getClientPaths();
+            if (client.mode !== 'host' || client.hosting_scope !== 'friends' || client.lan || !assetServer.running || !(await assetsReady())) throw Error('Start your own server in friends mode before sharing.');
+            const checked = JSON.parse(await runStack(['sharing-check']));
+            if (!checked.backendReady) throw Error('The server is not ready for friends.');
+            // Configuration checks above verify each published container port.
+            // Also reject a reachable listener on any current LAN interface.
+            const net = require('node:net');
+            const addresses = Object.values(os.networkInterfaces()).flat().filter(info => info && !info.internal && info.family === 'IPv4');
+            for (const info of addresses) for (const port of [3338, 6900, 6121, 5121]) {
+                await new Promise((resolve, reject) => {
+                    const socket = net.connect({ host: info.address, port });
+                    socket.once('connect', () => { socket.destroy(); reject(Error('A game or management port is reachable on the LAN. Turn off LAN hosting and restart before sharing.')); });
+                    socket.once('error', error => ['ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EACCES'].includes(error.code) ? resolve() : reject(Error('Could not verify private game listeners.')));
+                    socket.setTimeout(1000, () => { socket.destroy(); reject(Error('Could not verify private game listeners.')); });
+                });
+            }
+        },
+        register: (request, stillInvited) => queueServerOperation(async () => {
+            if (!stillInvited() || !sharing?.gateway || !['sharing', 'connecting', 'reconnecting'].includes(sharing.state)) throw Error('Sharing stopped');
+            const era = getSettings().prerenewal ? 'prerenewal' : 'renewal';
+            return require('./accounts').runAccounts(stackBin(), stackEnv(), { ...request, action: 'invite-create', era });
+        }),
+    });
+}
+
 
 // Windows ships every payload binary with a .exe suffix, which the embed kit
 // and our own build both produce correctly -- it was only ever this side that
@@ -157,24 +225,9 @@ function unpackTranslationData(root) {
 // predates pre-renewal being packaged.
 const TRANSLATION_ERAS = ['Renewal', 'Pre-Renewal'];
 
-// The translation tree for the era currently selected.
-//
-// Pre-Renewal is an overlay on Renewal, not a replacement -- upstream
-// "supports pre-renewal by overwriting the content of the Renewal folder with
-// the Pre-Renewal one", and the trees show it: 613 files against 67. Serving
-// Pre-Renewal on its own would lose most of the translation and leave the
-// player with untranslated item and quest text.
-//
-// The supervisor does that merge, into the state directory, on every start --
-// one implementation rather than two that can disagree. Renewal needs no merge
-// and comes from the payload. If the merge has not happened yet, Renewal is
-// the safe answer: wrong-era towns, but readable text.
-function translationRoot(root, prerenewal) {
-	if (prerenewal) {
-		const merged = path.join(stateDir(), 'translation');
-		if (fs.existsSync(path.join(merged, 'data'))) return merged;
-	}
-	return path.join(root, 'vendor/ROenglishRE/Translation/Renewal');
+// The supervisor commits the era-specific translation with the asset tree.
+function translationRoot() {
+	return path.join(stateDir(), 'assets/.translation');
 }
 
 // A tar reader that decodes member names as UTF-8, on every platform.
@@ -428,16 +481,21 @@ function migrateDataRoot() {
 // rather than at each call site because there are seven of them and a missed
 // one is a setting that silently does nothing.
 function withEngineFlags(args) {
-	if (args[0] !== 'up' && args[0] !== 'repair') return args;
+	if (!['up', 'repair', 'secure-services', 'hosting-check'].includes(args[0])) return args;
 	const client = getClientPaths();
 	const out = [...args];
 	if (client.lan && !out.includes('--lan')) out.push('--lan');
+	if (args[0] === 'hosting-check') return out;
 	const ram = Number(client.vm_ram_mib);
 	if (Number.isFinite(ram) && ram > 0) out.push('--ram', String(ram));
 	return out;
 }
 
-function runStack(rawArgs) {
+async function runStack(rawArgs) {
+    if (sharing && ['up', 'down', 'repair', 'backup', 'restore', 'secure-services'].includes(rawArgs[0])) await sharing.stop();
+    return runStackProcess(rawArgs);
+}
+function runStackProcess(rawArgs) {
 	const args = withEngineFlags(rawArgs);
 	return new Promise((resolve, reject) => {
 		const root = projectRoot();
@@ -505,28 +563,12 @@ function runStack(rawArgs) {
 // Asset server
 // ---------------------------------------------------------------------------
 
-let assetsChild = null;
+const { AssetServer, sha256, processIdentity } = require('./asset-server');
+const assetServer = new AssetServer({ log: message => appLog(message), identify: pid => processIdentity(pid, stackBin()) });
+let assetLinkQueue = Promise.resolve();
 
-function assetsReady() {
-	return new Promise(resolve => {
-		const req = require('http').get(
-			{ host: '127.0.0.1', port: 3338, path: '/api/health', timeout: 2000 },
-			res => {
-				res.resume();
-				resolve(res.statusCode === 200);
-			}
-		);
-		req.on('error', () => resolve(false));
-		req.on('timeout', () => {
-			req.destroy();
-			resolve(false);
-		});
-	});
-}
+function assetsReady() { return assetServer.ready(); }
 
-// Windows only: the drive letter a path sits on, against the one the app keeps
-// its data on, when they differ. Null everywhere else, for a UNC path, and when
-// they match -- "same drive" is not a question worth asking then.
 // The operating system as a person would name it, plus the number an engineer
 // needs. Windows reports 10.0.x for both 10 and 11, so the build is the only
 // thing that separates them and 22000 is where 11 begins.
@@ -558,84 +600,54 @@ function cpuDescription() {
 	return `${model} (${cpus.length} logical, ${process.arch})`;
 }
 
-function otherDrive(p) {
-	if (process.platform !== 'win32') return null;
-	const of = q => (/^([A-Za-z]):[\\/]/.exec(q || '') || [])[1];
-	const from = of(p);
-	const to = of(dataRoot());
-	if (!from || !to || from.toUpperCase() === to.toUpperCase()) return null;
-	return { from: from.toUpperCase(), to: to.toUpperCase() };
-}
-
 async function assetsStart() {
-	if (await assetsReady()) return;
+	await assetLinkQueue;
 	const root = projectRoot();
 	const server = findTool('robrowser-remoteclient');
 	if (!server) throw new Error('the asset server binary is missing from this build');
-
-	const logPath = path.join(stateDir(), 'assets.log');
-	fs.mkdirSync(stateDir(), { recursive: true });
-	// Truncated on start, appended to by both streams: this log is where a
-	// failed asset request or a rejected proxy target shows up.
-	const log = fs.openSync(logPath, 'w');
-
-	assetsChild = spawn(server, [], {
-		cwd: root,
-		env: {
-			...process.env,
-			PATH: toolPath(),
-			PORT: '3338',
+	const client = getClientPaths();
+	const sources = ['data_grf', 'rdata_grf', 'official_grf', 'bgm_dir'].map(key => {
+		const filename = client[key] || '';
+		try {
+			const stat = fs.statSync(filename);
+			return [key, filename, stat.size, stat.mtimeMs];
+		} catch { return [key, filename, 'missing']; }
+	});
+	// Pass every RemoteClient setting explicitly, so .env/default changes
+	// cannot create a different effective server behind the same fingerprint.
+	return assetServer.start({
+		executable: server, cwd: root, stateRoot: stateDir(),
+		environment: {
+			PATH: toolPath(), PORT: '3338',
+			HOST: client.lan ? '0.0.0.0' : '127.0.0.1',
 			CLIENT_PUBLIC_URL: `http://${advertiseHost()}:3338`,
 			NODE_ENV: 'production',
-			SERVER_ROOT: path.join(stateDir(), 'assets'),
-			CLIENT_RESPATH: 'resources/',
-			CLIENT_DATAINI: 'DATA.INI',
-			ENABLE_STATIC_SERVE: 'true',
-			ROBROWSER_PATH: path.join(root, 'vendor/roBrowserLegacy/dist/Web'),
-			ENABLE_WSPROXY: 'true',
-			// The proxy refuses anything not listed, so a LAN host must allow
-			// its own routable address as well as loopback -- a joining client
-			// asks the proxy to reach the address the char-server handed it,
-			// which is the LAN one, and the login address the page it loaded
-			// was served from, which is whatever they typed.
-			WS_ALLOWED_TARGETS: localHostnames()
-				.flatMap(h => [`${h}:6900`, `${h}:6121`, `${h}:5121`])
-				.join(','),
-			DATA_OVERRIDE_PATH: path.join(
-				translationRoot(root, getSettings().prerenewal),
-				'data',
-			),
+			SERVER_ROOT: path.resolve(stateDir(), 'assets'),
+			CLIENT_RESPATH: 'resources/', CLIENT_DATAINI: path.resolve(stateDir(), 'asset-config/DATA.INI'),
+			BGM_PATH: readIfExists(path.join(stateDir(), 'asset-config/bgm.path')).trim(),
+			AI_PATH: readIfExists(path.join(stateDir(), 'asset-config/ai.path')).trim(),
+			ENABLE_STATIC_SERVE: 'true', ENABLE_WSPROXY: 'true',
+			ROBROWSER_PATH: path.resolve(root, 'vendor/roBrowserLegacy/dist/Web'),
+			WS_ALLOWED_TARGETS: proxyTargets(client).sort().join(','),
+			DATA_OVERRIDE_PATH: path.resolve(translationRoot(), 'data'),
+			ENABLE_COMPRESSION: process.env.ENABLE_COMPRESSION || 'true',
+			CACHE_MAX_FILES: process.env.CACHE_MAX_FILES || '5000',
+			CACHE_MAX_MEMORY_MB: process.env.CACHE_MAX_MEMORY_MB || '1024',
+			CACHE_WARM_UP: process.env.CACHE_WARM_UP || 'false',
+			CACHE_WARM_UP_LIMIT: process.env.CACHE_WARM_UP_LIMIT || '500',
+			CLIENT_ENABLESEARCH: process.env.CLIENT_ENABLESEARCH || 'true',
+			CLIENT_AUTOEXTRACT: process.env.CLIENT_AUTOEXTRACT || 'true',
+			GRF_FILENAME_ENCODING: process.env.GRF_FILENAME_ENCODING || 'auto',
+			RAGNAROK_PAYLOAD_VERSION: readIfExists(path.join(root, 'VERSION')).trim(),
+			RAGNAROK_OVERLAY_ID: readIfExists(path.join(stateDir(), 'assets/overlay.id')).trim(),
+			RAGNAROK_MANIFEST_ID: sha256(readIfExists(path.join(stateDir(), 'asset-config/DATA.INI'))),
+			RAGNAROK_CLIENT_CONFIG_ID: sha256(readIfExists(path.join(stateDir(), 'assets/Config.local.js'))),
+			RAGNAROK_ASSET_SOURCES_ID: sha256(JSON.stringify(sources)),
 		},
-		stdio: ['ignore', log, log],
-		detached: false,
-	});
-	assetsChild.on('exit', () => {
-		assetsChild = null;
 	});
 }
 
-function assetsStop() {
-	if (assetsChild) {
-		try {
-			assetsChild.kill();
-		} catch {
-			/* already gone */
-		}
-		assetsChild = null;
-	}
-	// A previous run may have left one behind with no handle to kill. pkill
-	// does not exist on Windows, so each platform gets the tool it has.
-	try {
-		const { execFileSync } = require('child_process');
-		if (process.platform === 'win32') {
-			execFileSync('taskkill', ['/F', '/IM', 'robrowser-remoteclient.exe'], { stdio: 'ignore' });
-		} else {
-			execFileSync('pkill', ['-f', 'robrowser-remoteclient'], { stdio: 'ignore' });
-		}
-	} catch {
-		/* nothing matched */
-	}
-}
+async function assetsStop() { if (sharing) await sharing.stop(); return assetServer.stop(); }
 
 // ---------------------------------------------------------------------------
 // Client paths and settings
@@ -683,12 +695,17 @@ function getClientPaths() {
 		saved = JSON.parse(fs.readFileSync(clientConfigPath(), 'utf8'));
 	} catch { /* no config yet */ }
 	const out = { ...DEFAULT_CLIENT, ...saved };
+	if (out.join_host) {
+		try { out.join_host = joinSession.remember(out.join_host); }
+		catch { out.join_host = ''; }
+	}
 	// Only when nothing has been chosen. A value in the file is the player's,
 	// including one they set on a machine they have since upgraded.
 	if (!Number.isFinite(Number(out.vm_ram_mib)) || Number(out.vm_ram_mib) <= 0) {
 		out.vm_ram_mib = defaultVmRamMib();
 	}
-	return out;
+	return require('./hosting-policy').effective(out,
+		require('./settings-store').read(path.join(stateDir(), 'settings.json'), {}));
 }
 
 // Stop joining and run the server here instead.
@@ -718,138 +735,38 @@ function advertiseHost() {
 	return '127.0.0.1';
 }
 
-// Every name by which a browser could have reached this machine.
-//
-// The proxy matches its allow-list against the literal "host:port" the client
-// asks for, and Config.local.js derives that host from location.hostname --
-// whatever the player typed in the address bar. Loopback plus the advertised
-// address is not enough: a machine on wifi and ethernet at once has two
-// addresses on the same subnet, lan_ip() advertises only the one the routing
-// table prefers, and a browser pointed at the other one is refused with
-// "failed to connect to server" and the reason only in assets.log. Same for
-// "localhost" and for the mDNS name, both of which are the obvious things to
-// type at a machine that is sitting in front of you.
-//
-// This does not widen what the proxy can reach -- every entry is an address
-// this machine already answers on, and only the three game ports are listed --
-// it stops the allow-list disagreeing with the way the player got here.
-function localHostnames() {
-	const names = new Set(['127.0.0.1', 'localhost', '::1', advertiseHost()]);
-	for (const addrs of Object.values(os.networkInterfaces())) {
-		for (const a of addrs || []) {
-			// Node 18 reports family as a string, older ones as a number.
-			if (a.family === 'IPv4' || a.family === 4) names.add(a.address);
-		}
-	}
-	// Browsers lowercase the hostname; macOS does not have to. os.hostname()
-	// answers whatever the DHCP domain made it ("host.lan"), so the mDNS name
-	// is built from the first label rather than by appending to the whole
-	// thing, which would produce host.lan.local.
-	const h = (os.hostname() || '').toLowerCase();
-	if (h) {
-		names.add(h);
-		names.add(`${h.split('.')[0]}.local`);
-	}
-	return [...names].filter(Boolean);
+// Login always names the host-side proxy's loopback. rAthena returns its
+// configured character/map address; keep precisely those three destinations.
+function proxyTargets(client) {
+	const backend = client.lan ? advertiseHost() : '127.0.0.1';
+	return ['127.0.0.1:6900', `${backend}:6121`, `${backend}:5121`];
 }
 
-// Why a host could not be reached, in words rather than in a code.
-//
-// Node reports these as "connect ECONNREFUSED 192.168.1.20:3338", and a player
-// who has been handed an address by a friend cannot do anything with that.
-// Each of these is a different problem with a different fix, which is why they
-// are told apart here instead of being flattened into one "could not connect".
-function whyUnreachable(e) {
-	switch (e.code) {
-		case 'ECONNREFUSED':
-			return 'nothing is listening there. The host has to start their server, ' +
-				'with "Let friends join" switched on, before anyone can connect.';
-		case 'ENOTFOUND':
-		case 'EAI_AGAIN':
-			return 'that name could not be looked up. Check the address for a typo.';
-		case 'EHOSTUNREACH':
-		case 'ENETUNREACH':
-			return 'that machine cannot be reached from this network. Joining works ' +
-				'over a network you are both on.';
-		case 'ECONNRESET':
-			return 'the connection was closed before an answer came back. Something ' +
-				'is listening on that port, but it is not a Ragnarok Offline host.';
-		case 'ETIMEDOUT':
-			return 'it did not answer. Check the address, and that the host is running.';
-		default:
-			return e.message;
-	}
-}
-
-// The reason is kept beside the sentence as well as in it: a dialog that has
-// already named the host in its headline wants the reason alone, and a page
-// with one line to spend wants the whole thing.
-function unreachable(url, reason) {
-	const e = new Error(`Could not connect to ${url}: ${reason}`);
-	e.reason = reason;
-	return e;
-}
-
-// Confirm a host is actually serving before a window is pointed at it, so an
-// address typo or an offline friend produces a sentence rather than a blank
-// window that never loads.
-function probeHost(url) {
-	return new Promise((resolve, reject) => {
-		const req = require('http').get(url, { timeout: 8000 }, res => {
-			res.resume();
-			// Any HTTP answer means something is listening and speaking HTTP,
-			// which is all this needs to establish.
-			resolve();
-		});
-		req.on('timeout', () => {
-			req.destroy();
-			reject(unreachable(url,
-				'it did not answer within 8 seconds. Check that the host is running, ' +
-				'and that you are both on the same network.'));
-		});
-		req.on('error', e => reject(unreachable(url, whyUnreachable(e))));
-	});
-}
-
-// The client's entry point on an asset server. The root redirects here (see
-// config/index.html), but the windows we open ourselves go straight to it
-// rather than through the hop. Defined once so the local and remote paths
-// cannot drift.
-const GAME_PATH = '/api.html?app=ONLINE';
-
-// The one address a host gives out. A whole URL, because it has to survive
-// being pasted into a browser as well as into the join box, and because
-// "http://host:3338/" reads as a link where "host:3338" reads as a riddle.
+// One public web origin; legacy LAN addresses are normalized by join-address.
 function serveUrl(host) {
-	return `http://${host}:3338/`;
+	const authority = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+	return `http://${authority}:3338/`;
+}
+function joinUrl(hostSpec) { return parseJoinAddress(hostSpec).origin; }
+
+async function prepareJoin(next) {
+	const origin = joinSession.remember(next.join_host);
+	const reached = await probeHost(origin);
+	await stopLocalHostForJoin();
+	joinSession.retarget(origin, reached.origin);
+	// An HTTP-to-HTTPS redirect is resolved before the game gets an invite.
+	// The saved host and navigation guard then agree on the secure origin.
+	fs.writeFileSync(clientConfigPath(), JSON.stringify({ ...next, join_host: reached.origin }, null, 2));
+	return reached;
 }
 
-// Whatever a player pastes, reduced to a base URL.
-//
-// The host copies a link, but what arrives in the box is anything: the bare
-// address, an address:port, the link itself, or the full game URL with
-// /api.html?app=ONLINE still on the end -- which callers would then append
-// GAME_PATH to a second time. Parsing and keeping only the authority means all
-// of those are the same input. Returned as a base URL: callers append
-// GAME_PATH when they want the game, and probe the base when they only want to
-// know it is up.
-function joinUrl(hostSpec) {
-	const raw = String(hostSpec || '').trim();
-	if (!raw) return '';
-	// URL wants a scheme, and reads a bare "host:3338" as one -- the port
-	// becomes the protocol -- so anything without one is given http.
-	let u;
-	try {
-		u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`);
-	} catch {
-		return '';
-	}
-	if (!u.hostname) return '';
-	// u.port is empty for a URL that named no port *and* for one that named the
-	// scheme's default, but a player who typed :80 meant :80, so the raw string
-	// decides rather than the parse.
-	const port = u.port || (/:\d+(?:\/|$|\?)/.test(raw) ? '80' : '3338');
-	return `http://${u.hostname}:${port}`;
+async function stopLocalHostForJoin() {
+	const hadAssets = assetServer.running;
+	await assetsStop();
+	// The first-run Join path has no runtime to stop. An existing host must
+	// finish shutting down before its saved mode can say it is only joining.
+	if (hadAssets || fs.existsSync(path.join(dataRoot(), 'nebula/run/docker.sock')))
+		await runStack(['down']);
 }
 
 // rdata.grf is not required. It was a renewal overlay on an older base client,
@@ -862,6 +779,14 @@ function clientComplete(p) {
 }
 
 function linkClient(paths) {
+	const selected = { ...paths };
+	const job = assetLinkQueue.then(() => linkClientOwned(selected));
+	assetLinkQueue = job.catch(() => {});
+	return job;
+}
+
+async function linkClientOwned(paths) {
+	await assetServer.prepare(stateDir());
 	const root = projectRoot();
 	// Read each path from *this* process before handing them to bash.
 	//
@@ -897,20 +822,6 @@ function linkClient(paths) {
 			if (e.code === 'ENOENT') {
 				hint = `${label} is no longer at that location. If it is on a removable ` +
 					'or network drive, connect it; if it moved, choose it again.';
-				// Reconnecting is only half an answer when the drive was never
-				// the same one. Windows cannot link across volumes without
-				// Developer Mode, so a player who plugs the drive back in hits
-				// the linking error next -- say both now rather than in two
-				// rounds. Same advice link_file gives, from the one place that
-				// still knows the path.
-				const other = otherDrive(p);
-				if (other) {
-					hint += ` It is also on the ${other.from}: drive while this app keeps ` +
-						`its data on ${other.to}:, and Windows cannot link files between ` +
-						`drives -- so move or copy it to ${other.to}: and choose it again. ` +
-						'(Turning on Developer Mode in Settings, System, For developers ' +
-						'is the alternative.)';
-				}
 				if (optional) {
 					hint += ` ${label} is optional -- Change asset locations has an ` +
 						'x beside it to forget it, and the game runs without it.';
@@ -945,6 +856,12 @@ function linkClient(paths) {
 }
 
 const SETTINGS_DEFAULTS = {
+	open_registration: true,
+	// How long a friends invitation stays valid, in days. Nothing to do with
+	// Cloudflare -- the tunnel runs as long as the app shares; this is only how
+	// long the invite token is accepted. A link posted in Discord should still
+	// work next weekend, and "Replace invitation" revokes one at any time.
+	sharing_invite_days: 7,
 	base_exp_rate: 100,
 	job_exp_rate: 100,
 	quest_exp_rate: 100,
@@ -976,11 +893,7 @@ const SETTINGS_DEFAULTS = {
 };
 
 function getSettings() {
-	try {
-		return { ...SETTINGS_DEFAULTS, ...JSON.parse(fs.readFileSync(path.join(stateDir(), 'settings.json'), 'utf8')) };
-	} catch {
-		return { ...SETTINGS_DEFAULTS };
-	}
+	return require('./settings-store').read(path.join(stateDir(), 'settings.json'), SETTINGS_DEFAULTS);
 }
 
 // rAthena has no zeny multiplier: whether monsters drop zeny at all is a
@@ -1023,12 +936,30 @@ function parameterConf(v) {
 		.join('');
 }
 
+// Whether the player has asked for faster levelling at all. 100 is 1x, and
+// rAthena's own bounds are the sliders' -- anything above 1x means the stock
+// one-level-per-kill cap would start eating the difference.
+function expRatesRaised(s) {
+	return Number(s.base_exp_rate) > 100
+		|| Number(s.job_exp_rate) > 100
+		|| Number(s.quest_exp_rate) > 100;
+}
+
 function toBattleConf(s) {
 	return (
 		'// Generated by Ragnarok Offline. Edits here are overwritten.\n' +
 		`base_exp_rate: ${s.base_exp_rate}\n` +
 		`job_exp_rate: ${s.job_exp_rate}\n` +
 		`quest_exp_rate: ${s.quest_exp_rate}\n` +
+		// Follows the EXP sliders rather than getting a switch of its own.
+		// rAthena ships this off, and off means a kill grants one level and
+		// *discards* the overflow above it (pc_checkbaselevelup caps the carried
+		// exp at next-1). So at any raised rate the sliders quietly stop paying
+		// out most of what they promise -- the player sees one level per monster
+		// at 50x and reads it as the setting not working. Quest exp counts too:
+		// it feeds the same two bars, so a raised quest rate is discarded on
+		// turn-in the same way.
+		`multi_level_up: ${expRatesRaised(s) ? 'yes' : 'no'}\n` +
 		`item_rate_common: ${s.item_rate_common}\n` +
 		`item_rate_common_boss: ${s.item_rate_common}\n` +
 		`item_rate_equip: ${s.item_rate_equip}\n` +
@@ -1086,7 +1017,7 @@ async function saveSettings(settings) {
 	// settings written there would be silently lost.
 	const state = stateDir();
 	fs.mkdirSync(path.join(state, 'conf'), { recursive: true });
-	fs.writeFileSync(path.join(state, 'settings.json'), JSON.stringify(settings, null, 2));
+	settings = require('./settings-store').write(path.join(state, 'settings.json'), settings, SETTINGS_DEFAULTS);
 	writeSettingsFiles(settings);
 
 	// A marker rather than a value: stack.sh regenerates the Kafra scripts from
@@ -1097,43 +1028,27 @@ async function saveSettings(settings) {
 
 	// Same shape: the supervisor only needs to know which era to start.
 	const era = path.join(state, 'prerenewal');
-	const eraChanged = fs.existsSync(era) !== !!settings.prerenewal;
 	if (settings.prerenewal) fs.writeFileSync(era, '');
 	else fs.rmSync(era, { force: true });
 
-	// Cycle the asset server around the supervisor, not after it.
-	//
-	// Two reasons, and the order matters for the second. It resolves the
-	// era's translation tree once, when it spawns, and assetsStart() returns
-	// early while one is already answering -- so without this the servers
-	// restart and the player is still served the previous era's maps, which
-	// for pre-renewal is a different Prontera, not different wording.
-	//
-	// And it has to stop *before* the supervisor runs: the supervisor rebuilds
-	// the merged tree by deleting state/translation and relinking it, while
-	// the asset server is serving files straight out of that directory.
-	// Deleting a tree another process holds open is a sharing violation on
-	// Windows, and where the delete does succeed the server spends the rebuild
-	// serving a half-built tree.
-	//
-	// Only when the era actually changed, and only if one is running: a
-	// joining player has no asset server and should not be given one.
-	const cycleAssets = eraChanged && !!assetsChild;
+	// link-assets now owns the translated overlay and generated client config.
+	// Restarting RemoteClient alone does not change either. Rebuild on Apply,
+	// including retries after a partially completed era switch or mod change.
+	const client = getClientPaths();
+	if (client.mode === 'join') return 'Settings saved for your own server. Joining starts no local server.';
+	const cycleAssets = assetServer.running;
 	if (cycleAssets) {
-		appLog('era changed: stopping the asset server before the rebuild');
-		assetsStop();
+		appLog('applying settings: stopping the asset server before rebuilding');
+		await assetsStop();
 	}
 
 	const out = await runStack(['up']);
-
+	if (clientComplete(client)) await linkClient(client);
 	if (cycleAssets) {
-		try {
-			await assetsStart();
-			appLog('era changed: asset server restarted');
-		} catch (e) {
-			appLog(`could not restart the asset server after an era change: ${e.message}`);
-		}
+		await assetsStart();
+		appLog('settings applied: asset server restarted');
 	}
+
 	return out;
 }
 
@@ -1304,6 +1219,28 @@ function makeWindow(id, file, opts) {
 	// someone navigating away from a tab, and quitting runs the same teardown
 	// either way.
 	win.webContents.on('will-prevent-unload', e => e.preventDefault());
+	// Remote game pages stay on their selected web origin. In particular a
+	// redirect must not downgrade HTTPS, forward an inherited invite fragment
+	// to another origin, or navigate into a privileged local Settings file.
+	if (id === 'game') {
+		const guard = (event, legacyUrl) => {
+			const current = getClientPaths();
+			const allowed = current.mode === 'join' && current.join_host
+				? joinUrl(current.join_host) : 'http://127.0.0.1:3338';
+			let target;
+			try { target = new URL(event.url || legacyUrl); } catch { event.preventDefault(); return; }
+			if (target.origin !== allowed || target.username || target.password) {
+				event.preventDefault();
+				appLog('blocked game navigation outside the selected host origin');
+			}
+		};
+		win.webContents.on('will-navigate', guard);
+		win.webContents.on('will-redirect', guard);
+		win.webContents.on('did-navigate-in-page', (_event, url, isMainFrame) => {
+			if (isMainFrame) joinSession.exchanged(url);
+		});
+		win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+	}
 	// Everything the game page logs, written to client.log.
 	//
 	// The client is where the failures we cannot see happen. A player reported
@@ -1327,11 +1264,17 @@ function makeWindow(id, file, opts) {
 		clientLog(level, text, line, src);
 	});
 	// A page that fails to load at all logs nothing, so it needs saying here.
-	win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+	win.webContents.on('did-fail-load', (_e, code, desc, url, isMainFrame) => {
 		clientLog('error', `page failed to load: ${desc} (${code}) ${url || ''}`);
+		if (id === 'game' && isMainFrame && code !== -3 && /^https?:/.test(url || '')) {
+			showGameFailure(win, 'The game page could not load. Check the host connection, then retry.');
+		}
 	});
 	win.webContents.on('render-process-gone', (_e, details) => {
 		clientLog('error', `renderer gone: ${details && details.reason}`);
+		if (id === 'game' && details?.reason !== 'clean-exit') {
+			showGameFailure(win, 'The game window stopped unexpectedly. Retry to reopen the client and log in again.');
+		}
 	});
 	// `opts.url` wins over a bundled page: a joining player's game window is
 	// the host's own client, served over HTTP, not a local copy of it.
@@ -1420,6 +1363,18 @@ function gameTitle() {
 // surfaces a failure with a retry, and only then navigates -- a joining player
 // pointed straight at a host gets a blank window when that host is down, with
 // nothing to act on. Where it navigates *to* is decided in launch_game.
+// Kept in the owner process so a failed/terminated game renderer cannot lose
+// its recovery reason. Loading the boot page never retries automatically.
+let gameFailure = null;
+function showGameFailure(win, message) {
+	if (tearingDown || !win || win.isDestroyed() || win !== windows.game || win.recoveryLoading) return;
+	gameFailure = message;
+	win.recoveryLoading = true;
+	win.loadFile(path.join(__dirname, '..', 'src', 'index.html'))
+		.catch(error => appLog(`Could not load game recovery: ${error.message}`))
+		.finally(() => { win.recoveryLoading = false; });
+}
+
 const openGame = () => {
 	const c = getClientPaths();
 	const win = makeWindow('game', 'index.html', { width: 1280, height: 800, title: gameTitle(), rememberBounds: true });
@@ -1527,7 +1482,7 @@ const handlers = {
 		// the app would not run it, and the difference is the whole point of
 		// having a reason to show.
 		return out.split('\n').filter(Boolean).map(l => {
-			const [state, name, description, reason, origin, version, author, grants] = l.split('\t');
+			const [state, name, description, reason, origin, version, author, grants, settings] = l.split('\t');
 			return {
 				name,
 				enabled: state === 'on',
@@ -1541,11 +1496,26 @@ const handlers = {
 				// commands players get. Said next to the checkbox because a
 				// mod's own description is not a trustworthy place to learn it.
 				grantsCommands: grants === 'grants-commands',
+				// Options the mod declared in its mod.json, each with the value
+				// in force. Absent for a mod that declares none, and for an
+				// older supervisor that does not write the field at all.
+				settings: (() => {
+					try { return JSON.parse(settings || '[]'); } catch { return []; }
+				})(),
 			};
 		});
 	},
 	set_mod_enabled: ({ name, enabled }) =>
 		runStack([enabled ? 'mod-enable' : 'mod-disable', name]),
+	// Values reach the supervisor as one JSON argument; it validates them
+	// against what the mod actually declares before writing anything. The
+	// client only reads them when its config is regenerated, so rebuild the
+	// asset overlay here rather than leaving the game showing stale options.
+	set_mod_settings: async ({ name, values }) => {
+		await runStack(['mod-settings', String(name), JSON.stringify(values ?? {})]);
+		if (clientComplete(getClientPaths())) await linkClient(getClientPaths());
+		return { applied: true };
+	},
 	// Install a mod from a folder or a .zip the player chose.
 	//
 	// A mod is not data: it drops scripts and tables into the server's paths and
@@ -1562,6 +1532,16 @@ const handlers = {
 	},
 	open_mods_folder: () => {
 		const dir = path.join(stateDir(), 'mods');
+		fs.mkdirSync(dir, { recursive: true });
+		shell.openPath(dir);
+		return dir;
+	},
+	// The data folder itself: characters, settings, logs, crash reports and
+	// the staged backups all live under it, and it is the thing a bug report
+	// or a manual backup actually wants. dataRoot(), not stateDir() -- the
+	// player is looking for the whole install, not one directory inside it.
+	open_data_folder: () => {
+		const dir = dataRoot();
 		fs.mkdirSync(dir, { recursive: true });
 		shell.openPath(dir);
 		return dir;
@@ -1633,6 +1613,44 @@ const handlers = {
 		add('client', Object.entries(c)
 			.map(([k, v]) => `${k.padEnd(14)}${v === '' ? '(unset)' : v}`).join('\n'));
 		add('settings', JSON.stringify(getSettings(), null, 2));
+		add('Cloudflare sharing', JSON.stringify({
+			state: sharing?.state || 'stopped',
+			helper: require('./sharing/helper').helperDiagnostics(path.join(dataRoot(), 'sharing/helpers')),
+		}, null, 2));
+
+		// What sharing actually did, including the helper download and
+		// cloudflared's own output. The status block above says the current
+		// state; this says how it got there.
+		try {
+			const file = path.join(dataRoot(), 'sharing', 'sharing.log');
+			const body = fs.readFileSync(file, 'utf8').split('\n');
+			add('sharing.log (tail)', body.slice(-80).join('\n'));
+		} catch { /* never shared from this install */ }
+
+		// Preserved map-server crashes. The container log above only carries
+		// the run it is on, so a server that has died more than once loses
+		// every earlier trace from it -- these are the retained copies, and
+		// they are the whole reason the crash capture exists.
+		try {
+			const crashes = path.join(stateDir(), 'crashes');
+			// Structured incident reports, and the raw server logs kept beside
+			// them. Newest last, and only the last few in full: a server that
+			// has died repeatedly would otherwise bury everything else.
+			const listed = [];
+			for (const [where, label] of [[path.join(crashes, 'reports'), 'report'], [crashes, 'log']]) {
+				for (const name of fs.readdirSync(where).sort()) {
+					const file = path.join(where, name);
+					if (fs.statSync(file).isFile() && name.endsWith('.log')) listed.push({ file, name, label });
+				}
+			}
+			if (listed.length) {
+				add('preserved crashes', listed.map(e => `${e.label}: ${e.name}`).join('\n'));
+				for (const entry of listed.slice(-3)) {
+					add(`crash ${entry.label}: ${entry.name}`,
+						fs.readFileSync(entry.file, 'utf8').slice(-40000));
+				}
+			}
+		} catch { /* no crashes recorded */ }
 
 		try {
 			add('engine', await runStack(['status']));
@@ -1760,7 +1778,7 @@ const handlers = {
 		if (fs.existsSync(cfgToml)) {
 			add('nebula/config.toml', fs.readFileSync(cfgToml, 'utf8'));
 		}
-		return lines.join('\n');
+		return joinSession.redact(lines.join('\n'));
 	},
 
 	// Straight to the clipboard, because the destination is a text box on
@@ -1795,11 +1813,97 @@ const handlers = {
 		return 'Diagnostics copied. Paste them into the issue that just opened.';
 	},
 	stack_repair: () => runStack(['repair']),
+	secure_services: async () => {
+		if (getClientPaths().mode !== 'host') throw new Error('Switch to your own server before securing its internal credentials.');
+		const output = await runStack(['secure-services']);
+		return output.match(/^Internal service credentials secured for (?:renewal|prerenewal)\..*$/m)?.[0]
+			|| 'Internal service credentials secured. Player accounts and characters were preserved.';
+	},
+    sharing_token_help: () => shell.openExternal('https://dash.cloudflare.com/profile/api-tokens'),
+    sharing_status: () => {
+        let saved, configurationError = '';
+        try { saved = getSharingSecrets().load(); } catch (error) { configurationError = error.message; }
+        // The invitation itself, so Settings can show the link a friend
+        // actually needs rather than the hostname alone -- a hostname on its
+        // own looks copyable and is useless to whoever receives it. Only while
+        // sharing, and only to the host's own window.
+        let invitation = '';
+        try { invitation = getSharing().invitation(); } catch { /* not sharing yet */ }
+        return { configured: !!saved, ...getSharing().status(), configuredHostname: saved?.hostname || '', configurationError, invitation };
+    },
+    sharing_connect: async request => {
+        if (getClientPaths().mode !== 'host') throw Error('Cloudflare setup belongs to your own server.');
+        const secrets = getSharingSecrets(); secrets.requireStorage();
+        if (secrets.load()) throw Error('Cloudflare is already connected. Forget the saved setup before choosing another hostname.');
+        await require('./sharing/helper').ensureHelper(path.join(dataRoot(), 'sharing/helpers'));
+        const saved = await require('./sharing/cloudflare').provision(request);
+        try { secrets.save(saved); }
+        catch {
+            const api = require('./sharing/cloudflare').api;
+            try {
+                await api(request.apiToken, 'DELETE', `/zones/${saved.zoneId}/dns_records/${saved.dnsRecordId}`);
+                await api(request.apiToken, 'DELETE', `/accounts/${saved.accountId}/cfd_tunnel/${saved.tunnelId}`);
+            } catch { throw Error('Could not save setup or remove its Cloudflare records. Remove this hostname and its Ragnarok Offline tunnel in Cloudflare before retrying.'); }
+            throw Error('Could not save Cloudflare setup. Check your secure password storage and disk permissions.');
+        }
+        return { hostname: saved.hostname };
+    },
+    sharing_start: async ({ useDomain = false } = {}) => {
+        const request = ++sharingStartRequest;
+        if (getClientPaths().mode !== 'host') throw Error('Start your own server before sharing.');
+        const saved = useDomain ? getSharingSecrets().load() : null;
+        if (useDomain && !saved) throw Error('Connect your Cloudflare domain first, or use a temporary session link.');
+        // Securing this era's internal credentials is mechanical: it backs the
+        // database up first and preserves every account and character. Refusing
+        // here and telling the player to go find a button in another section is
+        // what made "share with friends" feel like a maze, so just do it. Safe
+        // to run from here -- sharing has not started, so runStack's stop-first
+        // rule for this verb has nothing to interrupt.
+        const era = getSettings().prerenewal ? 'prerenewal' : 'renewal';
+        if (!fs.existsSync(path.join(stateDir(), 'private/service-credentials', era, 'credentials.json'))) {
+            appLog('sharing: securing this era\u2019s internal service credentials (one time; the database is backed up first)');
+            await runStack(['secure-services']);
+        }
+        // Account safeguards stay in force, but the signup policy is the
+        // owner's to set. Sharing used to force it off and then hide the
+        // resulting check failure, which made _M/_F unreachable over a link
+        // even though the tunnel only carries invited friends.
+        const policy = JSON.parse(await runStack(['hosting-check']));
+        const missing = policy.checks.filter(check => !check.passed);
+        if (missing.length) throw Error(missing.map(check => check.detail).join(' '));
+        await saveSettings({ hosting_scope: 'friends' });
+        await assetsStart();
+        if (request !== sharingStartRequest) return getSharing().status();
+        await getSharing().start(saved);
+        return getSharing().status();
+    },
+    sharing_stop: async () => { ++sharingStartRequest; await getSharing().stop(); return getSharing().status(); },
+    sharing_copy: () => {
+        clipboard.writeText(getSharing().invitation());
+        // Say the figure actually in force rather than a number baked into the
+        // sentence: this is configurable, and it was never Cloudflare's limit.
+        const days = Number(getSettings().sharing_invite_days);
+        if (days === 0) return 'Invitation copied. It works until you replace it or stop sharing.';
+        const span = Math.min(30, Math.max(1, days || 7));
+        return `Invitation copied. It works for ${span} day${span === 1 ? '' : 's'}, until you replace it, or until you stop sharing.`;
+    },
+    // The invitation is otherwise reused for the life of the install, so this
+    // is the only thing that changes a link -- and it disconnects everyone
+    // holding the old one, which is why the button is styled as destructive.
+    sharing_replace: () => {
+        getSharing().replaceInvitation();
+        return 'New link created. The previous link stopped working and friends using it were disconnected.';
+    },
+    sharing_forget: async () => { await getSharing().stop(); getSharingSecrets().forget(); return 'Saved credentials removed. The hostname and stopped tunnel remain in your Cloudflare account for you to remove there.'; },
+	hosting_check: async () => {
+		if (getClientPaths().mode !== 'host') throw new Error('Hosting checks belong to your own server.');
+		return JSON.parse(await runStack(['hosting-check']));
+	},
 	db_backup: ({ path: p }) => runStack(['backup', p]),
 	db_restore: ({ path: p }) => runStack(['restore', p]),
 
 	// Re-link the client every start: a freshly materialised runtime has no GRF
-	// symlinks or DATA.INI in it yet, and only the setup window writes those.
+	// generated assets or a private archive manifest yet, and only the setup window writes those.
 	start_stack: async () => {
 		const saved = getClientPaths();
 		// Joining runs no engine, no containers and no asset server: the host
@@ -1807,10 +1911,9 @@ const handlers = {
 		// address fails here with something a player can act on rather than as
 		// a blank window later.
 		if (saved.mode === 'join') {
-			const url = joinUrl(saved.join_host);
 			fs.mkdirSync(stateDir(), { recursive: true });
 			fs.writeFileSync(path.join(stateDir(), 'phase'), `Connecting to ${saved.join_host}…\n`);
-			await probeHost(url);
+			await prepareJoin(saved);
 			fs.writeFileSync(path.join(stateDir(), 'phase'), 'Ready\n');
 			return 'joined';
 		}
@@ -1834,7 +1937,7 @@ const handlers = {
 
 	// Asset server
 	assets_start: () => assetsStart(),
-	assets_stop: () => assetsStop(),
+	assets_stop: () => { ++sharingStartRequest; return assetsStop(); },
 	// In host mode this is the local asset server coming up. A joining player
 	// starts no asset server at all, so waiting for one would spin until the
 	// boot page's deadline and then report a stall that never had anything to
@@ -1865,17 +1968,18 @@ const handlers = {
 			// A joining player supplies an address and nothing else -- no GRFs
 			// to validate, and nothing to link, because the host serves both
 			// the client and its assets.
-			const url = joinUrl(next.join_host);
-			if (!url) throw new Error('Enter the address your friend gave you.');
-			await probeHost(url);
-			next.join_host = url.replace(/^http:\/\//, '');
-			fs.writeFileSync(clientConfigPath(), JSON.stringify(next, null, 2));
+			await prepareJoin(next);
 			return 'joined';
 		}
 		if (!fs.existsSync(next.data_grf)) throw new Error('data.grf is not a file');
 		// Only when one was given: absent is allowed, wrong is not.
 		if (next.rdata_grf && !fs.existsSync(next.rdata_grf)) {
 			throw new Error('rdata.grf is not a file');
+		}
+		if (Object.hasOwn(paths, 'lan')) {
+			next.hosting_scope = paths.lan ? 'lan' : 'local';
+			require('./settings-store').write(path.join(stateDir(), 'settings.json'),
+				{ hosting_scope: paths.lan ? 'lan' : 'local' }, SETTINGS_DEFAULTS);
 		}
 		fs.writeFileSync(clientConfigPath(), JSON.stringify(next, null, 2));
 		return linkClient(next);
@@ -1887,7 +1991,7 @@ const handlers = {
 	get_mode: () => {
 		const c = getClientPaths();
 		return {
-			mode: c.mode, lan: !!c.lan, join_host: c.join_host,
+			mode: c.mode, lan: !!c.lan, hosting_scope: c.hosting_scope, join_host: c.join_host,
 			// Only meaningful once the stack has run; before that there is no
 			// endpoint.json and no address to give out.
 			join_address: c.mode === 'host' && c.lan ? serveUrl(advertiseHost()) : '',
@@ -1900,7 +2004,13 @@ const handlers = {
 		if (lan !== undefined) next.lan = !!lan;
 		// Provoke the macOS prompt here, next to the switch that needs it.
 		if (lan === true && !prev.lan) await nudgeLocalNetworkPermission();
-		if (join_host !== undefined) next.join_host = String(join_host).trim();
+		if (join_host !== undefined) next.join_host = join_host ? joinSession.remember(join_host) : '';
+		if (mode === 'join' && prev.mode !== 'join') await stopLocalHostForJoin();
+		if (lan !== undefined) {
+			next.hosting_scope = lan ? 'lan' : 'local';
+			require('./settings-store').write(path.join(stateDir(), 'settings.json'),
+				{ hosting_scope: lan ? 'lan' : 'local' }, SETTINGS_DEFAULTS);
+		}
 		fs.writeFileSync(clientConfigPath(), JSON.stringify(next, null, 2));
 		// Before anything slow: the mode has already changed, and leaving the
 		// window claiming (Local) over a server that is about to stop is the
@@ -1914,18 +2024,14 @@ const handlers = {
 		//
 		// The database is untouched: it lives in a volume that outlives the
 		// containers, so switching back to hosting finds the same characters.
-		if (mode === 'join' && prev.mode !== 'join') {
-			assetsStop();
-			try {
-				await runStack(['down']);
-			} catch {
-				/* nothing was running */
-			}
-		}
 		return next;
 	},
 	scan_client_dir: ({ dir }) => scanClientDir(dir),
 	get_settings: () => getSettings(),
+	accounts: request => {
+		if (getClientPaths().mode !== 'host') throw new Error('Accounts belong to the host. Switch to your own server to manage them.');
+		return require('./accounts').runAccounts(stackBin(), stackEnv(), request);
+	},
 	host_ram_mib: () => Math.floor(require('os').totalmem() / (1024 * 1024)),
 	// Whether idle guest memory comes back. vz (macOS) balloons; the krun
 	// backend behind Windows and Linux does not, and is not expected to, so on
@@ -1958,7 +2064,16 @@ const handlers = {
 	// already given up stayed on screen forever, with the assets saved and the
 	// server never started. Finishing setup is exactly the event that makes
 	// the earlier answer wrong, so the page has to run again.
+	open_crash_reports: async () => {
+		const directory = path.join(stateDir(), 'crashes', 'reports');
+		if (!fs.existsSync(directory)) throw new Error('No crash reports have been saved yet.');
+		const error = await shell.openPath(directory);
+		if (error) throw new Error('Could not open the crash reports folder.');
+	},
+	boot_failure: () => gameFailure,
+	clear_boot_failure: () => { gameFailure = null; },
 	open_game: () => {
+		gameFailure = null;
 		const existed = windows.game && !windows.game.isDestroyed();
 		const win = openGame();
 		// Load the boot page, not reload(). By the time this is called the
@@ -1987,7 +2102,12 @@ const handlers = {
 		// race for no gain.
 		if (c.mode !== 'join') await dropStaleClientCache();
 		const win = openGame();
-		win.loadURL(base + GAME_PATH);
+		try {
+			await win.loadURL(c.mode === 'join' ? joinSession.url(base) : base + GAME_PATH);
+		} catch (error) {
+			if (error.code !== 'ERR_ABORTED') showGameFailure(win, 'The game page could not load. Check the host connection, then retry.');
+			throw error;
+		}
 		win.setTitle(gameTitle());
 	},
 
@@ -2033,6 +2153,8 @@ function clientLogStart() {
 const CLIENT_LOG_LEVELS = ['verbose', 'info', 'warning', 'error'];
 let clientLogBytes = 0;
 function clientLog(level, text, line, src) {
+	text = joinSession.redact(text);
+	src = joinSession.redact(src);
 	// roBrowser logs a line per file it loads, and the DB alone is hundreds.
 	// That volume is worth keeping -- comparing the loads that started against
 	// the ones that finished is exactly how a stalled database is spotted --
@@ -2053,6 +2175,7 @@ function clientLog(level, text, line, src) {
 }
 
 function appLog(line) {
+	line = joinSession.redact(line);
 	try {
 		const dir = stateDir();
 		fs.mkdirSync(dir, { recursive: true });
@@ -2072,18 +2195,37 @@ function appLog(line) {
 // arbitrary path to write to.
 //
 // So the bridge is split by where the page came from. The app's own windows are
-// loaded with `loadFile`, so they are `file://` and get everything. The game is
-// loaded with `loadURL`, so it is `http://` and gets only what is on this list.
+// loaded from three exact bundled files and own the controls. The game is
+// loaded over HTTP or HTTPS and gets only what is on this list.
 //
 // It is empty today because the game page needs nothing. Adding a name here is
 // a decision about what a page served by a stranger may do to this machine —
 // not a convenience.
 const GAME_PAGE_HANDLERS = new Set([]);
+// Includes settings writes before their supervisor call: an era marker must
+// not change halfway through an account operation. Read-only status stays live.
+const SERVER_OPERATIONS = new Set(['sharing_connect', 'sharing_start', 'sharing_forget', 'accounts', 'hosting_check', 'save_settings', 'set_mode', 'set_client_paths', 'start_stack',
+	'stack_up', 'stack_down', 'stack_repair', 'secure_services', 'db_backup', 'db_restore']);
+let serverOperationQueue = Promise.resolve();
+function queueServerOperation(operation) {
+	if (tearingDown) return Promise.reject(new Error('The app is quitting; wait until the next launch.'));
+	const pending = serverOperationQueue.then(operation);
+	serverOperationQueue = pending.catch(() => {});
+	return pending;
+}
 
-/// Where an IPC call came from. `file://` means one of our own pages.
+// Only our exact bundled top-level pages own the host controls. A generic
+// file:// check would also grant them to any other local document.
 function callerIsOwnPage(event) {
 	const url = (event && event.senderFrame && event.senderFrame.url) || '';
-	return url.startsWith('file://');
+	if (!event || !event.sender || event.senderFrame !== event.sender.mainFrame) return false;
+	try {
+		const parsed = new URL(url);
+		if (parsed.protocol !== 'file:') return false;
+		const filename = require('url').fileURLToPath(parsed);
+		return ['index.html', 'setup.html', 'settings.html']
+			.some(name => filename === path.join(__dirname, '..', 'src', name));
+	} catch { return false; }
 }
 
 ipcMain.handle('invoke', async (event, name, args) => {
@@ -2095,6 +2237,12 @@ ipcMain.handle('invoke', async (event, name, args) => {
 	const fn = handlers[name];
 	if (!fn) throw new Error(`unknown command: ${name}`);
 	try {
+		if (SERVER_OPERATIONS.has(name)) {
+			return await queueServerOperation(async () => {
+                if (sharing && ((name === 'accounts' && args?.action !== 'list') || ['set_mode', 'set_client_paths', 'save_settings', 'stack_repair', 'secure_services', 'db_restore'].includes(name))) await sharing.stop();
+                return fn(args || {});
+            });
+		}
 		return await fn(args || {});
 	} catch (e) {
 		const msg = (e && e.message) || String(e);
@@ -2141,6 +2289,18 @@ function buildMenu() {
 // ---------------------------------------------------------------------------
 
 let tearingDown = false;
+const crashMonitor = new (require('./crash-monitor').CrashMonitor)({
+	active: () => !tearingDown && assetServer.running && assetServer.current?.identity?.launchId,
+	collect: () => queueServerOperation(() => !tearingDown && assetServer.running
+		? runStack(['capture-crashes']) : ''),
+	log: message => appLog(message),
+	onCrash: services => {
+        ++sharingStartRequest;
+        if (sharing) sharing.stop().catch(() => {});
+		const label = services.includes('map') ? 'Map server' : 'Game server';
+		showGameFailure(windows.game, `${label} stopped unexpectedly. A private crash report was saved. Retry to restart the server and log in again.`);
+	},
+});
 // Set when a launch arrives while we are quitting: see the second-instance
 // handler. Guarded because two clicks must not queue two copies.
 let relaunchQueued = false;
@@ -2164,8 +2324,11 @@ function stackEnv() {
 // the whole app — the window stopped redrawing and the Dock showed it as not
 // responding until the containers finished stopping. Quitting must stay
 // responsive even though the work behind it is slow.
-function teardownAsync() {
-	assetsStop();
+async function teardownAsync() {
+    ++sharingStartRequest;
+    if (sharing) await sharing.stop();
+	await serverOperationQueue;
+	try { await assetsStop(); } catch (error) { appLog(`asset shutdown failed: ${error.message}`); }
 	// A joining player started no engine and no containers, so there is
 	// nothing to stop -- and `down` would spend its timeout talking to a
 	// docker socket that was never created.
@@ -2186,7 +2349,8 @@ function teardownAsync() {
 // by the OS and there is no guarantee the event loop runs again, so there is
 // nothing to await with.
 function teardownSync() {
-	assetsStop();
+    if (sharing?.child) sharing.child.kill();
+	assetServer.stopSync();
 	if (getClientPaths().mode === 'join') return;
 	try {
 		const { cwd, env } = stackEnv();
@@ -2253,6 +2417,8 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
+	crashMonitor.start();
+    powerMonitor.on('suspend', () => { ++sharingStartRequest; if (sharing) sharing.stop().catch(() => {}); });
 	// Before anything reads a path: an existing install still has its data
 	// under the old folder name.
 	migrateDataRoot();
@@ -2263,7 +2429,7 @@ app.whenReady().then(() => {
 	// "cannot be reached" page, which says nothing about which host or why.
 	const c = getClientPaths();
 	if (c.mode === 'join' && c.join_host) {
-		probeHost(joinUrl(c.join_host))
+		queueServerOperation(() => prepareJoin(c))
 			.then(() => openGame())
 			.catch(err => {
 				dialog.showMessageBox({

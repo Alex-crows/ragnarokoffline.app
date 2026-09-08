@@ -47,6 +47,13 @@ progresses. Every launch after that is ~10-15 seconds.
 Log in with **`ragnarok`** / **`ragnarok`** — the account is created for you on
 first run — and make a character.
 
+Change that password in **Settings → Accounts → Refresh accounts → Change
+GM/admin password**. The panel identifies the affected era and account ID and
+requires confirmation. Each era has its own password; changing one leaves the
+other alone. Account changes disconnect players briefly and restart game
+services, preserving characters and privileges. Startup and Repair never
+recreate a default login that was deleted or renamed in an existing database.
+
 **`ragnarok` is a GM account.** It can use every `@` command including warping. 
 With GM accounts your outfit generally always looks like a GM, so if you don't want that create your own non-GM account.
 
@@ -57,6 +64,25 @@ doesn't matter if you pick `_M` or `_F`, you are still able to create male and
 female characters after logging in. After your first account creation, you can 
 login as `myname`  without the suffix. Both the name and the password need at least four characters.
 
+To approve accounts yourself, choose **Settings → Accounts → New account creation →
+Owner only, through Settings**, then **Apply account creation policy and restart**.
+This disables `_M` / `_F` signup while existing accounts keep working. Create
+ordinary accounts with **Create friend account** in the same panel. The account
+creation policy applies to both eras and survives Repair and era changes; accounts
+and passwords themselves remain separate for each era. Local/LAN installs retain
+login signup until you change this setting. For friends outside your LAN, use
+[Cloudflare browser invitations](docs/FRIENDS_SHARING.md).
+
+For internal server passwords, **Settings → Internet sharing → Prepare server for friends** saves a backup and replaces the selected era’s shared service
+credentials. Game logins and characters are preserved. See
+[managed internal credentials](docs/SERVICE_CREDENTIALS.md) for persistence and
+recovery. Sharing also checks account permissions and private game listeners.
+
+**Check internet account safeguards** in that panel reports the selected era's
+account-policy checks. It does not publish a link. See the
+[hosting policy contract](docs/HOSTING_POLICY.md) for mandatory internet defaults
+and the [browser sharing guide](docs/FRIENDS_SHARING.md).
+
 Ordinary accounts have almost no `@` commands — rAthena keeps `@autoloot` and
 `@showexp` for GMs. Settings → Mods → **player-commands** gives player characters some common commands.
 
@@ -66,6 +92,14 @@ hunting in the fields, standing around town, running vending stalls you can
 actually buy from. See [Filling the world](#filling-the-world) below.
 
 ---
+
+## Sharing with friends over the internet
+
+Use **Settings → Multiplayer → Set up sharing over the internet**, then choose
+**Share with friends → Copy invitation link**. Temporary session links need no
+Cloudflare account or token; connecting your own fixed hostname is optional.
+Friends open the HTTPS link in their browser and play on your running world.
+See [setup, invitation expiry and Stop sharing](docs/FRIENDS_SHARING.md).
 
 ## Hosting and playing with friends on your LAN
 
@@ -98,12 +132,17 @@ their owners.
 Joining a friend's server does not require you to download assets. On the setup
 screen, just click **Join a friend** and paste the link that your friend sent.
 
+Full links keep their HTTP or HTTPS scheme and port. A bare LAN address such as
+`192.168.1.20` uses port 3338. HTTPS certificate failures must be fixed by the
+host; the app does not bypass certificate verification.
+
 <img src="docs/assets/joinafriend.png" alt="First-run setup screen on the Join a friend tab, asking for the host's server address" width="640">
 
 The host serves the client and the artwork, so joining starts in seconds instead
 of the few minutes a first run takes. You make your own character on their
 server: on the login screen, add `_M` or `_F` to the end of a new username and
-that account is created as you log in.
+that account is created as you log in, if the host allows signup. Internet
+invitations instead offer account creation before entering the game.
 
 ### Joining from a browser, with nothing installed
 
@@ -214,7 +253,7 @@ flowchart TB
 Ports are published to `127.0.0.1` unless you turn on
 [LAN hosting](#hosting-and-playing-with-friends-on-your-lan), which binds them to
 your network interface instead. The GRFs stay wherever you keep them —
-the app symlinks them into a server root and reads them where they lie, so a
+the app reads them in place through a private archive manifest, so a
 3.5 GB client is never duplicated.
 
 ### What actually happens when you press play
@@ -330,6 +369,8 @@ a client folder on the wrong drive, the virtual machine refusing to start,
 the first login not taking, and moving your characters to another machine —
 are collected in **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)**.
 
+Unexpected game-server exits also retain private [crash evidence](docs/CRASH_DIAGNOSTICS.md) before container cleanup. Native stack traces and the intermittent crash investigation remain in progress.
+
 If yours is not there, the Settings window has a **Report a problem** button
 that copies everything a fix needs — logs, paths, versions — and opens a new
 issue ready to paste it into. Or ask in the
@@ -354,6 +395,21 @@ that has actually been run, with a README saying what it demonstrates. Copy the
 folder closest to what you want.
 
 <img src="docs/assets/modlogin.jpg" alt="A custom login screen from the login-screen example mod" width="640">
+
+## Documentation
+
+**[flux159.github.io/ragnarokoffline.app](https://flux159.github.io/ragnarokoffline.app/)**
+— installing, a page for each Settings tab, playing with friends, making mods
+and troubleshooting. Source is in [docs-site/docs](docs-site/docs); the deeper
+references for people working on the app stay in [docs/](docs).
+
+## Playing from the keyboard
+
+Skills and items go on the shortcut bar — `F1`–`F9`, `1`–`9`, and two more rows
+— which is roBrowser's own and always there. The bundled `wasd-movement` mod
+adds walking, `Q`/`E` camera turning and a spacebar attack on the nearest
+monster. Those two share some keys, and you choose which wins:
+**[docs/KEYBOARD_CONTROLS.md](docs/KEYBOARD_CONTROLS.md)**.
 
 ## Advanced features
 

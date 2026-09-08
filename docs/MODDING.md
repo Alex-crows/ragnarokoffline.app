@@ -26,9 +26,9 @@ The mods directory is:
 or `$RAGNAROK_OFFLINE_HOME/state/mods` if that is set — which is how to test
 against a scratch install instead of the one you play on.
 
-**Nine worked examples live in [`examples/mods/`](../examples/mods).** Each one
-is a mod that has actually been run, with a README saying what it demonstrates
-and what to look at first. Start from the one closest to what you want.
+**Worked examples live in [`examples/mods/`](../examples/mods).** Their READMEs
+describe what each demonstrates and what to look at first. Start from the one
+closest to what you want.
 
 Mods merge in **name order**, so if two touch the same file the later name
 wins. Everything is reassembled on every start, so removing a folder removes
@@ -81,6 +81,56 @@ contributes no tables, no scripts, no assets and no plugin.
 The **folder name** is the mod's identity — it is what `disabled.txt` lists,
 what the script mount is called, and what decides merge order. A `mod.json`
 that calls the mod something else gets a warning, and the folder name wins.
+
+### settings — options the app renders for you
+
+A mod that wants one switch should not have to ship its own settings window.
+Declare the options in `mod.json` and the app draws them under **Settings →
+Mods**, right below the mod's checkbox:
+
+```json
+{
+  "name": "wasd-movement",
+  "settings": [
+    {
+      "key": "show_controls_button",
+      "type": "boolean",
+      "default": true,
+      "label": "Show the Controls button in game",
+      "description": "Turn this off to keep keyboard movement without the on-screen button."
+    }
+  ]
+}
+```
+
+`type` is `"boolean"`, `"number"` or `"string"` — three scalars, because the
+app has to render them without knowing what the mod means by them. Anything
+richer is the mod's own UI problem. A number takes optional `min` and `max`, a
+string an optional `max_length` (200 at most); `key` is up to 40 letters,
+digits or underscores, and a mod may declare at most twenty.
+
+The values arrive as the **first argument to your client entry point**, the one
+you were already given:
+
+```js
+export default function init(parameters, api) {
+  const showButton = parameters?.show_controls_button !== false;
+}
+```
+
+Read them defensively, the way that line does. A saved value the mod no longer
+declares is dropped, a value of the wrong type falls back to your default, and
+a number outside your own `min`/`max` is clamped to it — so a hand-edited
+`mod-settings.json` cannot hand your mod something it said it could not take.
+Answers live in `state/mod-settings.json`, outside both the runtime tree an
+update replaces and the `state/mods` folder that only exists for mods somebody
+installed, so a bundled mod's options survive an app update.
+
+Settings are read when the client config is generated, so **Apply** rewrites it
+and the game picks the new values up on its next load. Changing an option does
+not disable the mod: it stays on and decides for itself what to do with the
+answer, which is the point — `show_controls_button` hides a button while
+keyboard movement keeps working.
 
 ## Installing a mod
 
@@ -508,16 +558,20 @@ translation's version and add to it.
 can restyle the interface, adjust the viewport, or hook the client's own UI.
 
 **It must be an ES module whose default export is a function.** The plugin
-manager `import()`s the file and calls `module.default(params)`; a truthy
-return means "loaded".
+manager imports the file and awaits `module.default(params, api)`. Initializers
+run in configured order before login, once per page. Existing one-argument
+plugins remain compatible. Return a cleanup function or `{ dispose() }` for
+owned resources; `false` reports failure. A failed or timed-out initializer
+releases its registered resources and does not stop the next plugin or login.
 
 ```js
 // my-mod/client/index.js
-export default function () {
+export default function (params, api) {
+	if (api?.version !== 1) throw new Error('This mod requires client API 1');
 	const css = document.createElement('style');
 	css.textContent = '#chat { font-size: 15px !important; }';
 	document.head.appendChild(css);
-	return true;
+	return () => css.remove();
 }
 ```
 
@@ -530,13 +584,75 @@ to check.
 The second thing: **roBrowser's windows live in shadow roots**, and a `<style>`
 in the document head does not cross that boundary. To restyle the interface
 rather than the page, build a `CSSStyleSheet` and adopt it into each shadow
-root as it appears. [`mods/mobile-ui`](../mods/mobile-ui) does exactly this and
-is worth reading for it.
+root as it appears. Use `api.on('ui:append', component => …)` for supported
+component notifications. Already mounted components replay to new subscribers;
+`ui:remove` lets a mod remove its styles. Avoid scanning the entire document on
+every DOM mutation. See [`examples/mods/client-api`](../examples/mods/client-api).
 
 Enabled mods are written into the `plugins` map of the generated
 `Config.local.js` automatically; there is nothing to register by hand. Files
-next to `index.js` are served from `plugins/<mod-name>/`, and paths inside the
-plugin resolve from the **server root**, not from the plugin folder.
+next to `index.js` are served from `plugins/<mod-name>/`. The configured entry
+path resolves from the page URL; relative ES module imports resolve from the
+importing module. Use `new URL('./file.css', import.meta.url)` for adjacent
+resources. Plugin entries must use the same HTTP(S) origin as the game.
+
+### Client API 1
+
+This is an unprivileged game-page API. It does not expose Electron IPC, engine
+objects, passwords, database operations or arbitrary packet construction.
+It is a supported interface, not a sandbox for untrusted JavaScript.
+
+| API | Contract |
+| --- | --- |
+| `api.on(event, listener, { replay: true })` | Returns an unsubscribe function; subscriptions also end at disposal. Events: `map:enter`, `map:leave`, `connection`, `ui:append`, `ui:remove`, `movement:clear`, `preferences:change`. |
+| `api.snapshot()` | Frozen copy of map, connection, player position/HP/SP, selected target identity/name/HP, camera, packet version and movement counters. Server movement acknowledgements are read-only evidence. |
+| `api.components.current()` | Mounted `{ name, root, host }` descriptors. DOM references support styling; do not retain detached components after `ui:remove`. |
+| `api.preferences.get(key, fallback)` / `.set(key, value)` | JSON values isolated by plugin, browser and server origin. Storage failure is reported by `set`. Do not store secrets. |
+| `api.movement.register(name, onCancel)` | Returns `begin(x,y)`, `update(x,y)`, `end()`, `dispose()`. Screen-up is positive Y. Only a deliberate `begin` can take ownership; a stale `update` cannot. |
+| `api.input.state()` / `.shortcutConflict(keyCode)` | Read input eligibility and the active native battle-shortcut mapping. |
+| `api.input.suspend()` | Suspend movement while showing a plugin dialog. Returns an idempotent release function, also released at disposal. |
+| `api.actions.perform(name, payload)` | Native actions: `attack`, `target` (toggle auto-target), `interact`, `pickup`, `menu` (game options), `shortcut` with `{ index: 0…35 }`, `shortcut:assign` and `storage:transfer` (below), or `window` with an allowed `{ name }`. Returns whether the action was dispatched, not whether the server accepted it. |
+| `api.cleanup(fn)` | Register idempotent cleanup immediately after allocating a resource. The returned function can release it early. Runs on failure, scope replacement and page teardown. |
+
+Allowed window actions currently cover Inventory, Equipment, SkillList, Quest,
+WorldMap, PartyFriends, WinStats and already-open Storage. Set `{ name, open: true }`
+to focus an existing window instead of toggling it closed. Storage must first be
+opened by the server; this action cannot create a storage session.
+
+Map and connection events clear movement;
+blur, hidden page, text entry, IME and modal UI also cancel it. Directional
+requests use native pathfinding and packets, with a 180 ms cadence and at most
+three path steps per destination. The server remains authoritative.
+
+`shortcut:assign` accepts `{ slot: 0…35, kind: 'item' | 'skill', id }`.
+For items, `id` is a current inventory **index**, not the item type ID; for skills
+it is the learned skill ID. The adapter validates the live item/learned level and
+uses the native shortcut assignment callbacks, including server persistence.
+
+`storage:transfer` accepts `{ direction: 'deposit' | 'withdraw', index, count }`.
+The index belongs to the live source inventory/storage list. Count must be a
+positive integer within the available stack or `'all'`. The adapter requires
+an open storage session, rejects equipped deposits, and invokes native storage
+callbacks. A `true` result means a request was sent; only the server's item
+updates establish success. The mobile controls show “Transfer requested.”
+
+Host mod enable/disable still requires the normal reload. Arbitrary older
+plugins cannot be safely hot-unloaded if they never registered cleanup. The
+in-game **Controls** button from [`wasd-movement`](../mods/wasd-movement) offers
+per-browser activation, rebinding, arrows and battle-shortcut priority.
+
+The bundled `mobile-ui` mod provides **Display** settings before login and under
+the phone's in-game **Menu**. Auto selects a phone layout on a touch-capable
+screen whose shorter side is at most 900 pixels. On/Off overrides that choice.
+Mode changes reload the client; control size changes apply immediately.
+Geometry preferences use a separate phone key selected before UI initialization,
+so a mode change cannot save phone coordinates into the desktop preferences.
+The phone HUD retains the native joystick, action handlers and shortcuts. Tap
+an inventory/equipment/skill entry, then its explicit action button; F1–F4 can
+be assigned from the inventory and skills toolbars. Storage adds quantity and
+whole-stack deposit/withdraw controls, with explicit focus buttons between it
+and inventory. Shops reuse the native buy/sell selection, quantity dialog and
+transaction callbacks. Their nested geometry also has a separate phone bank.
 
 ---
 
