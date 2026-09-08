@@ -422,7 +422,8 @@
        actually standing on. <b>How busy</b> scales the server's own spawn tables, so
        the world keeps the shape it was authored with and only its crowding changes;
        <b>Limit</b> is a safety ceiling across every map at once, and in a solo game
-       it never comes into play.</p>
+       it never comes into play. <b>How busy</b> above 50 can make the server sluggish
+       on a computer with less than 8&nbsp;GB of RAM.</p>
     <p class="note" id="ram-note"></p>
   </div>
   </div>
@@ -776,6 +777,10 @@ const STACK_BASE_MIB = 700;
 // Towns land in the same range.
 const TYPICAL_PER_MAP = 40;
 
+// The host's own RAM, filled in by host_facts below. Zero until it answers,
+// which reads as "not known" rather than "small".
+let hostTotalMib = 0;
+
 function refreshPopulation() {
   const on = $('population_enable').checked;
   const n = Number($('population_max').value);
@@ -812,6 +817,15 @@ function refreshPopulation() {
       + `alone you will see about ${perMap} on your own map, costing `
       + `roughly ${typical} MB of the ${ram / 1024} GB server.`;
     note.style.color = '';
+  }
+  // Separate axis from the ceiling above: this is the host's RAM, not the
+  // guest's. How busy multiplies the spawn tables, and so the map server's
+  // per-tick work, and a machine already short on memory has nothing spare to
+  // absorb it.
+  if (density > 50 && hostTotalMib && hostTotalMib < 8 * 1024) {
+    note.textContent += ' How busy above 50 can make the server sluggish on this '
+      + 'computer, which has under 8 GB of RAM.';
+    note.style.color = 'var(--warn, #d98)';
   }
 }
 
@@ -1231,6 +1245,8 @@ invoke('get_settings').then(s => {
 // guest memory to the host, Windows and Linux do not, so there it is held for
 // as long as the server runs.
 invoke('host_facts').then(f => {
+  hostTotalMib = Number(f.total_mib) || 0;
+  refreshPopulation();
   $('ram-note').textContent = f.balloons
     ? 'Server memory is a ceiling rather than a reservation: the virtual machine '
       + 'hands back what it is not using. Changing it restarts the virtual machine.'
