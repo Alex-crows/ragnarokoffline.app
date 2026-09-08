@@ -43,6 +43,16 @@
      than introduce a second spacing. Excluded for .row actions, which take
      their spacing from .row's own padding. */
   .actions:not(.row) { margin-top: 10px; }
+  /* Disclosure sections. Their bodies are direct children -- no wrapper and no
+     .actions row -- so nothing spaced them: the first control sat flush under
+     the summary, the loose buttons inside had no margin at all, and the last
+     line sat against whatever followed the section. Indent the body against
+     its summary and give those buttons the same 10px .actions uses. */
+  details { margin: 12px 0; padding-left: 14px; }
+  details > summary { cursor: pointer; margin-left: -14px; padding: 3px 0; }
+  details[open] { padding-bottom: 12px; }
+  details[open] > summary { margin-bottom: 6px; }
+  details button { margin-top: 10px; }
   button {
     background: var(--accent); color: #0d0f15; border: 0; border-radius: 6px;
     padding: 8px 16px; font-weight: 600; font-size: 13px; cursor: pointer;
