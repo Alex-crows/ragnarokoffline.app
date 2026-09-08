@@ -37,7 +37,10 @@
   .name { color: var(--dim); }
   .state { font-variant-numeric: tabular-nums; }
   .up { color: var(--ok); } .down { color: var(--bad); }
-  .actions { display: flex; gap: 8px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+  /* A button that hyphenates its own label to fit is worse than one that moves
+     to the next line, so wrap the row and never the label. */
+  .actions button { flex: 0 0 auto; white-space: nowrap; }
   /* Buttons sat flush against the row above them. Three callers already
      worked around it with an inline margin-top:10px, so match that rather
      than introduce a second spacing. Excluded for .row actions, which take
@@ -163,10 +166,17 @@
     <div class="row"><span class="name">Assets &amp; client (:3338)</span><span class="state" id="s-assets">—</span></div>
     <div class="row"><span class="name">Database</span><span class="state" id="s-db">—</span></div>
     <div class="row"><span class="name">Login / Char / Map</span><span class="state" id="s-servers">—</span></div>
-    <div class="row actions" style="padding-top:10px">
+    <!-- Running the server, and everything else. Two rows rather than one: six
+         buttons across a 650px window squeezed every label into two lines, and
+         the split is a real distinction -- the first three are what you press
+         to play, the rest are what you press when something is wrong. .row's
+         own border draws the separator between them. -->
+    <div class="row actions" style="padding-top:10px; justify-content: flex-start">
       <button id="start">Start</button>
       <button id="stop" class="ghost">Stop</button>
       <button id="play" class="ghost">Open game</button>
+    </div>
+    <div class="row actions" style="padding-top:10px; justify-content: flex-start">
       <button id="repair" class="ghost">Repair…</button>
       <button id="report" class="ghost">Report a problem…</button>
       <button id="diagnostics" class="ghost">Copy diagnostics</button>
