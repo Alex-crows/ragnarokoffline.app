@@ -38,6 +38,11 @@
   .state { font-variant-numeric: tabular-nums; }
   .up { color: var(--ok); } .down { color: var(--bad); }
   .actions { display: flex; gap: 8px; }
+  /* Buttons sat flush against the row above them. Three callers already
+     worked around it with an inline margin-top:10px, so match that rather
+     than introduce a second spacing. Excluded for .row actions, which take
+     their spacing from .row's own padding. */
+  .actions:not(.row) { margin-top: 10px; }
   button {
     background: var(--accent); color: #0d0f15; border: 0; border-radius: 6px;
     padding: 8px 16px; font-weight: 600; font-size: 13px; cursor: pointer;
@@ -449,14 +454,26 @@
   </div>
   </div>
 
-  <div class="panel"><pre id="log">idle</pre></div>
+  <!-- Shared status line. Several tabs report through it -- an era switch, a
+       server start, the LAN toggle, copying a link, opening the mods folder,
+       applying rates -- so it lives outside the tabs rather than being
+       repeated in each. Hidden until one of them has something to say: a
+       permanent box reading "idle" is a box that says nothing. -->
+  <div class="panel" id="log-panel" hidden><pre id="log"></pre></div>
 
 <script>
 const { invoke } = window.__ELECTRON__.core;
 const $ = id => document.getElementById(id);
 const RATES = ['base_exp_rate','job_exp_rate','quest_exp_rate','item_rate_common',
                'item_rate_equip','item_rate_card'];
-const log = m => { $('log').textContent = m; };
+const log = m => {
+  const text = String(m ?? '').trim();
+  $('log').textContent = text;
+  // Failures were as grey as everything else here, same as the status lines
+  // elsewhere in this window used to be.
+  $('log').classList.toggle('bad', /^error\b/i.test(text));
+  $('log-panel').hidden = !text;
+};
 
 function paint(el, ok, text) {
   el.textContent = text;
