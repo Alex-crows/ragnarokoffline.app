@@ -46,33 +46,47 @@ test('an unprobeable address is a result rather than a thrown error', async () =
   assert.equal(probe.verdict(report).shareable, true);
 });
 
+// Whether an address black-holes a packet or refuses it is the network's
+// decision, not ours: these once probed 10.255.255.x and asserted the result,
+// which passed here and classified three of six differently on a machine with
+// other routes. What belongs to this module is how it reports what it found,
+// so the reporting is tested on a report rather than on the local routing
+// table. Real sockets still cover open, closed and concurrency above.
+const filteredReport = addresses => {
+  const results = addresses.map(address => ({ address, port: 6900, outcome: 'filtered' }));
+  return { results, exposed: [], filtered: results, addresses };
+};
+
 // The Windows default: unsolicited inbound is dropped without a reset, so the
 // probe times out on a machine whose ports are correctly private. This used to
 // be the failure that made sharing impossible there.
-test('a dropped probe explains itself and still allows sharing', async () => {
-  const report = await probe.probeListeners({ addresses: ['10.255.255.1'], ports: [6900], timeoutMs: 250 });
-  assert.deepEqual(report.results.map(r => r.outcome), ['filtered']);
-  const decided = probe.verdict(report);
+test('a dropped probe explains itself and still allows sharing', () => {
+  const decided = probe.verdict(filteredReport(['10.255.255.1']));
   assert.equal(decided.shareable, true);
   assert.match(decided.message, /firewall dropped the check on 10\.255\.255\.1/);
   assert.match(decided.message, /verified separately/);
 });
 
-test('every probe is named with its address, port and outcome', async () => {
-  const report = await probe.probeListeners({ addresses: ['10.255.255.1'], ports: [6900, 6121], timeoutMs: 250 });
+test('every probe is named with its address, port and outcome', () => {
+  const report = {
+    results: [
+      { address: '10.255.255.1', port: 6900, outcome: 'filtered' },
+      { address: '10.255.255.1', port: 6121, outcome: 'closed' },
+    ],
+  };
   assert.equal(probe.describe(report), [
     '10.255.255.1:6900 filtered (no answer, so a packet filter dropped it)',
-    '10.255.255.1:6121 filtered (no answer, so a packet filter dropped it)',
+    '10.255.255.1:6121 closed (refused, so nothing is listening)',
   ].join('\n'));
 });
 
 // A machine with a dozen virtual adapters would otherwise put every one of
 // them in a sentence a player is meant to read.
-test('many affected adapters are summarised, not listed in full', async () => {
+test('many affected adapters are summarised, not listed in full', () => {
   const addresses = Array.from({ length: 6 }, (_, i) => `10.255.255.${i + 1}`);
-  const report = await probe.probeListeners({ addresses, ports: [6900], timeoutMs: 250 });
-  assert.equal(report.filtered.length, 6);
-  assert.match(probe.verdict(report).message, /10\.255\.255\.4 and 2 more/);
+  const message = probe.verdict(filteredReport(addresses)).message;
+  assert.match(message, /10\.255\.255\.4 and 2 more/);
+  assert.equal(message.includes('10.255.255.5'), false, 'the tail is counted, not named');
 });
 
 // Serial probing cost one timeout per address per port, which on the machine
