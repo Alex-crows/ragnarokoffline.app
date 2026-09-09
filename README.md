@@ -47,13 +47,6 @@ progresses. Every launch after that is ~10-15 seconds.
 Log in with **`ragnarok`** / **`ragnarok`** — the account is created for you on
 first run — and make a character.
 
-Change that password in **Settings → Accounts → Refresh accounts → Change
-GM/admin password**. The panel identifies the affected era and account ID and
-requires confirmation. Each era has its own password; changing one leaves the
-other alone. Account changes disconnect players briefly and restart game
-services, preserving characters and privileges. Startup and Repair never
-recreate a default login that was deleted or renamed in an existing database.
-
 **`ragnarok` is a GM account.** It can use every `@` command including warping. 
 With GM accounts your outfit generally always looks like a GM, so if you don't want that create your own non-GM account.
 
@@ -63,25 +56,6 @@ password, and press Login (example: `flux159_M` as the username). Note that it
 doesn't matter if you pick `_M` or `_F`, you are still able to create male and
 female characters after logging in. After your first account creation, you can 
 login as `myname`  without the suffix. Both the name and the password need at least four characters.
-
-To approve accounts yourself, choose **Settings → Accounts → New account creation →
-Owner only, through Settings**, then **Apply account creation policy and restart**.
-This disables `_M` / `_F` signup while existing accounts keep working. Create
-ordinary accounts with **Create friend account** in the same panel. The account
-creation policy applies to both eras and survives Repair and era changes; accounts
-and passwords themselves remain separate for each era. Local/LAN installs retain
-login signup until you change this setting. For friends outside your LAN, use
-[Cloudflare browser invitations](docs/FRIENDS_SHARING.md).
-
-For internal server passwords, **Settings → Internet sharing → Prepare server for friends** saves a backup and replaces the selected era’s shared service
-credentials. Game logins and characters are preserved. See
-[managed internal credentials](docs/SERVICE_CREDENTIALS.md) for persistence and
-recovery. Sharing also checks account permissions and private game listeners.
-
-**Check internet account safeguards** in that panel reports the selected era's
-account-policy checks. It does not publish a link. See the
-[hosting policy contract](docs/HOSTING_POLICY.md) for mandatory internet defaults
-and the [browser sharing guide](docs/FRIENDS_SHARING.md).
 
 Ordinary accounts have almost no `@` commands — rAthena keeps `@autoloot` and
 `@showexp` for GMs. Settings → Mods → **player-commands** gives player characters some common commands.
