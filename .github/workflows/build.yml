@@ -124,6 +124,7 @@ jobs:
           path: |
             vendor/roBrowserLegacy/dist/Web
             vendor/ROenglishRE/Translation
+            vendor/ROenglishRE/Addons/Navigation Legacy
           retention-days: 1
 
   # ---------------------------------------------------------------------------
