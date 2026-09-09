@@ -50,6 +50,20 @@ Character names need **at least 4 characters**, and only letters, numbers and
 spaces. The server returns the same generic refusal for several different
 problems, so the app checks the length before sending.
 
+## A character will not delete, and the birthday is refused
+
+The game checks the birthday against the account, and an account with none
+stored refuses every answer. Open **Settings → Accounts** and choose **Set
+missing account birthdays**, then answer `20000101`.
+
+Answers such as `000000` or `00-00-00`, suggested for other rAthena servers,
+never work here.
+
+If the birthday is accepted and the deletion is still refused, the character is
+waiting out its countdown. Deletion is queued for a day by default, and the
+same panel has **Character deletion** to make it immediate. A character in a
+party or guild is refused whichever you choose.
+
 ## Accounts and passwords
 
 Passwords are **8–23 printable ASCII characters** and cannot be the account
