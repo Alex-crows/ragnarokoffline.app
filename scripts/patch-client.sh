@@ -910,6 +910,35 @@ elif s.count(old) == 1:
 else:
     sys.exit("ItemCompare.css: description style no longer matches (%d hits); re-check the patch" % s.count(old))
 
+# 0014 - Render Ragnarok color markers in status-description tooltips.
+#
+# Generic data-text labels are deliberately inserted with textContent. The
+# WinStats descriptions are different: their localized messages contain
+# ^RRGGBB markers which should color the affected stat names.
+p = rb / "src/UI/Components/WinStats/WinStatsCommon.js"
+s = p.read_text()
+old = """		_root = this.getRoot();
+
+		// Base stat up buttons"""
+new = """		_root = this.getRoot();
+
+		// Stat descriptions use RO color codes (^RRGGBB), unlike regular UI labels.
+		// Keep data-text's safe text lookup, then only render formatting in tooltips.
+		_root.querySelectorAll('.desc .hover[data-text]').forEach(tooltip => {
+			const escaped = document.createElement('div');
+			escaped.textContent = DB.getMessage(tooltip.dataset.text, '');
+			tooltip.innerHTML = DB.formatMsgToHtml(escaped.innerHTML);
+		});
+
+		// Base stat up buttons"""
+if "tooltip.innerHTML = DB.formatMsgToHtml(escaped.innerHTML);" in s:
+    print("WinStatsCommon.js status tooltips already patched")
+elif s.count(old) == 1:
+    p.write_text(s.replace(old, new, 1))
+    print("patched WinStatsCommon.js (format status tooltip colors)")
+else:
+    sys.exit("WinStatsCommon.js: tooltip initialization no longer matches (%d hits); re-check the patch" % s.count(old))
+
 PY
 
 python3 "$ROOT/scripts/patch-client-controls.py" "$ROOT" "$RB"
