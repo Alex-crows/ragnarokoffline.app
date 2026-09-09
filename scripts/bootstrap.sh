@@ -33,6 +33,9 @@ echo "==> building the web client"
 # and the online client is launched with ROBrowser.TYPE.FRAME, which loads
 # api.html in an iframe. Skipping build targets yields a blank window.
 (cd "$VENDOR/roBrowserLegacy" && npm ci --no-audit --no-fund && npm run build:all)
+# Patches that edit the built bundle rather than src/. The release workflow
+# runs this same script, so the two build paths cannot diverge.
+"$ROOT/scripts/patch-bundle.sh" "$VENDOR/roBrowserLegacy/dist/Web"
 (cd "$VENDOR/roBrowserLegacy/dist/Web" && rm -f \
     GrfViewer.js MapViewer.js ModelViewer.js StrViewer.js EffectViewer.js \
     GrannyModelViewer.js screenshotwide.png screenshotnarrow.png)

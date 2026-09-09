@@ -169,7 +169,8 @@ part of running an RO server on a Mac is not the server — it is that the serve
 never meant to run on one. So we do not port it; we bring Linux. The same holds for
 Windows, which is how one codebase covers three platforms.
 
-roBrowserLegacy carries three small client patches in `patches/`. rAthena is
+roBrowserLegacy is built with the client fixes in `patches/` and
+`scripts/patch-client.sh`. rAthena is
 built from a clean upstream clone with one optional server modification compiled
 in: the [Population Engine](https://github.com/YlenXWalker/Population-Engine),
 which fills a solo world with AI characters and is **off unless you turn it on**
