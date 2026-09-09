@@ -97,6 +97,9 @@ Inside it:
 are read in place, so a 3.5 GB client is never duplicated and is never at risk
 from anything on this page.
 
+NOTE: If you wipe your app data directory, you will lose any mods you downloaded. Make sure to copy the `state/mods` folder
+to a safe place before deleting so you can recover your mods.
+
 ---
 
 ## How much disk it uses
