@@ -867,6 +867,49 @@ elif s.count(anchor) == 1:
 else:
     sys.exit("EquipmentV4.css: removeOption block no longer matches (%d hits); re-check the patch" % s.count(anchor))
 
+# 0013 - Render inventory comparison descriptions like the regular item window.
+#
+# ItemInfo escapes the description and passes it through formatMsgToHtml, which
+# interprets Ragnarok's ^RRGGBB color markers. ItemCompare assigned the same
+# description with textContent instead, exposing those markers as raw text.
+p = rb / "src/UI/Components/ItemCompare/ItemCompare.js"
+s = p.read_text()
+old = """	const descInner = root.querySelector('.description-inner');
+	if (descInner) {
+		descInner.textContent = item.IsIdentified ? it.identifiedDescriptionName : it.unidentifiedDescriptionName;
+	}"""
+new = """	const descInner = root.querySelector('.description-inner');
+	if (descInner) {
+		const rawDesc = item.IsIdentified ? it.identifiedDescriptionName : it.unidentifiedDescriptionName;
+		descInner.innerHTML = DB.formatMsgToHtml(_escapeHTML(rawDesc));
+	}"""
+if "descInner.innerHTML = DB.formatMsgToHtml(_escapeHTML(rawDesc));" in s:
+    print("ItemCompare.js description already patched")
+elif s.count(old) == 1:
+    p.write_text(s.replace(old, new, 1))
+    print("patched ItemCompare.js (format comparison description)")
+else:
+    sys.exit("ItemCompare.js: description renderer no longer matches (%d hits); re-check the patch" % s.count(old))
+
+# HTML rendering collapses newlines unless the comparison description opts
+# into preserving them. ItemInfo already has this rule; ItemCompare did not.
+p = rb / "src/UI/Components/ItemCompare/ItemCompare.css"
+s = p.read_text()
+old = """.ItemCompare .description .description-inner {
+	width: 150px;
+}"""
+new = """.ItemCompare .description .description-inner {
+	width: 150px;
+	white-space: pre-wrap;
+}"""
+if new in s:
+    print("ItemCompare.css line breaks already patched")
+elif s.count(old) == 1:
+    p.write_text(s.replace(old, new, 1))
+    print("patched ItemCompare.css (preserve description line breaks)")
+else:
+    sys.exit("ItemCompare.css: description style no longer matches (%d hits); re-check the patch" % s.count(old))
+
 PY
 
 python3 "$ROOT/scripts/patch-client-controls.py" "$ROOT" "$RB"
