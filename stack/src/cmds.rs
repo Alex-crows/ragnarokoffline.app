@@ -1613,6 +1613,10 @@ pub fn up(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> Result<
     run_server(cfg, dk, "ragnarok-map", 5121, &format!("/rathena/map-server{era}"), lan)?;
     phase(cfg, "Loading maps and NPCs…");
     wait_for_maps(dk)?;
+    // After the map server has read its tables and before anyone is told the
+    // world is ready: this is the only moment rAthena's verdict on the mods'
+    // own tables exists, and it exists in its log and nowhere else.
+    crate::mods::record_load_report(cfg, dk);
     phase(cfg, "Ready");
     println!("stack up");
     // The one string a host pastes to a friend. Printed rather than only

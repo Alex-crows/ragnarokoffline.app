@@ -825,6 +825,10 @@ pub fn assemble(cfg: &Config) -> Result<Assembled, String> {
             out.maps = maps.iter().map(|m| m.name.clone()).collect();
             out.map_lines = maps.iter().map(|m| format!("map: {}\n", m.name)).collect();
         }
+        // Kept beside the merged tree, because after this nothing about a file
+        // in it says which mod put it there -- and that is what a complaint
+        // from the server has to be attributed to.
+        write_owners(&dst, &owners);
         out.db = Some(dst);
     }
 
@@ -1081,8 +1085,298 @@ pub fn save_settings(cfg: &Config, name: &str, body: &str) -> Result<(), String>
     fs::rename(&temporary, &path).map_err(|e| format!("publishing mod settings: {e}"))
 }
 
-pub fn list(cfg: &Config) -> Vec<[String; 9]> {
+/// Where the last start's verdict on the mods' tables is kept.
+///
+/// Beside `mod-settings.json` rather than inside `modbuild`, which is deleted
+/// and rebuilt on every start: the report has to outlive the run that produced
+/// it, because Settings is usually read with the server stopped.
+fn report_path(state: &Path) -> PathBuf {
+    state.join("mod-load-report.json")
+}
+
+/// Which mod supplied each file under `db/import`, written where the next
+/// command can read it.
+///
+/// `assemble` is the only place that knows this -- afterwards the files are
+/// merged into one tree and nothing about them says where they came from.
+fn write_owners(dst: &Path, owners: &BTreeMap<String, String>) {
+    let mut body = String::new();
+    for (file, owner) in owners {
+        body.push_str(&format!("{}\t{}\n", one_line(file), one_line(owner)));
+    }
+    let _ = fs::write(dst.join(OWNERS_FILE), body);
+}
+
+fn read_owners(db: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Ok(body) = fs::read_to_string(db.join(OWNERS_FILE)) else {
+        return out;
+    };
+    for line in body.lines() {
+        if let Some((file, owner)) = line.split_once('\t') {
+            out.insert(file.to_string(), owner.to_string());
+        }
+    }
+    out
+}
+
+const OWNERS_FILE: &str = ".owners.tsv";
+
+/// One table a mod supplied, and what the server made of it.
+#[derive(Debug, PartialEq)]
+pub struct TableResult {
+    pub file: String,
+    pub offered: u32,
+    pub accepted: u32,
+    /// The server's own complaints, in the order it made them.
+    pub errors: Vec<String>,
+}
+
+/// Strip the colour codes and carriage returns rAthena writes between fields.
+///
+/// Its status lines are printed without newlines and overwritten in place, so
+/// several of them share one physical line with escape sequences in between.
+/// Scanning has to happen on the whole text, not line by line.
+fn plain(text: &str) -> String {
+    let bytes: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '\u{1b}' {
+            i += 1;
+            if i < bytes.len() && bytes[i] == '[' {
+                i += 1;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == '\r' {
+            i += 1;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The text between `after` and the next `'`, starting the search at `from`.
+fn quoted_at(text: &str, from: usize) -> Option<(String, usize)> {
+    let rest = &text[from..];
+    let end = rest.find('\'')?;
+    Some((rest[..end].to_string(), from + end + 1))
+}
+
+/// Read the map server's account of loading `db/import`.
+///
+/// This is rAthena's verdict, not a second opinion: it owns the parser, and
+/// re-implementing enough of it here to predict the answer is exactly the kind
+/// of plausible-and-wrong that the real thing cannot be.
+///
+/// The shape it prints, once the escape codes are gone:
+///
+/// ```text
+/// Loading 'db/import/skill_db.yml'...Loading '1' entries in 'db/import/skill_db.yml'
+/// [Error]: Node "Id" cannot be parsed as t.
+/// [Error]: Occurred in file 'db/import/skill_db.yml' on line 5 and column 4.
+/// Done reading '0' entries in 'db/import/skill_db.yml'
+/// ```
+///
+/// One entry offered and none kept, with the reason in between. Only files
+/// under `db/import` are read, and only the errors between a file's own two
+/// markers, so the stub-not-found noise from an unpackaged tree and one
+/// table's failure never land on another.
+pub fn parse_table_results(log: &str) -> Vec<TableResult> {
+    const PREFIX: &str = "db/import/";
+    let text = plain(log);
+    let mut open: Vec<(String, u32, usize)> = Vec::new();
+    let mut out: Vec<TableResult> = Vec::new();
+    let mut at = 0usize;
+
+    while at < text.len() {
+        let Some(mark) = text[at..].find(" entries in '") else {
+            break;
+        };
+        let mark = at + mark;
+        // The count sits in quotes just before it: `Loading '1' entries in`.
+        let head = &text[..mark];
+        let Some(count_end) = head.rfind('\'') else {
+            at = mark + 1;
+            continue;
+        };
+        let Some(count_start) = head[..count_end].rfind('\'') else {
+            at = mark + 1;
+            continue;
+        };
+        let count: u32 = match head[count_start + 1..count_end].parse() {
+            Ok(count) => count,
+            Err(_) => {
+                at = mark + 1;
+                continue;
+            }
+        };
+        let done = head[..count_start].ends_with("Done reading ");
+        let Some((file, next)) = quoted_at(&text, mark + " entries in '".len()) else {
+            break;
+        };
+        at = next;
+
+        if !file.starts_with(PREFIX) {
+            continue;
+        }
+        let file = file[PREFIX.len()..].to_string();
+
+        if !done {
+            open.push((file, count, mark));
+            continue;
+        }
+        // A close with no open is a table this build never announced; skip it
+        // rather than invent an offered count for it.
+        let Some(index) = open.iter().rposition(|(name, _, _)| *name == file) else {
+            continue;
+        };
+        let (_, offered, from) = open.remove(index);
+        let mut errors = Vec::new();
+        for line in text[from..mark].lines() {
+            let line = line.trim();
+            for tag in ["[Error]:", "[Warning]:"] {
+                if let Some(rest) = line.find(tag) {
+                    let message = line[rest + tag.len()..].trim();
+                    if !message.is_empty() {
+                        errors.push(message.to_string());
+                    }
+                }
+            }
+        }
+        out.push(TableResult { file, offered, accepted: count, errors });
+    }
+    out
+}
+
+/// Say what rAthena means by the type name in a parse failure.
+///
+/// `database.cpp` builds that message with `typeid(R).name()`, which on
+/// everything but MSVC returns the *mangled* name -- so the one diagnostic
+/// that should say what a field expected says `t`, and the modder it is
+/// addressed to has no way to know that means a number. Expanded here rather
+/// than left as a single letter, because the whole reason this report exists
+/// is that nobody could act on what the server said.
+fn expand_type_name(message: &str) -> Option<String> {
+    const MARKER: &str = "cannot be parsed as ";
+    let at = message.find(MARKER)? + MARKER.len();
+    let rest = &message[at..];
+    let end = rest.find(['.', ' ']).unwrap_or(rest.len());
+    let name = match &rest[..end] {
+        "b" => "true or false",
+        "a" | "c" | "h" | "s" | "t" | "i" | "j" | "l" | "m" | "x" | "y" => "a whole number",
+        "f" | "d" => "a number",
+        _ => return None,
+    };
+    Some(format!("{} is {name}", &rest[..end]))
+}
+
+/// Turn one table's result into the sentence Settings shows.
+fn describe(result: &TableResult) -> String {
+    let kept = result.accepted;
+    let offered = result.offered;
+    let plural = |n: u32| if n == 1 { "entry" } else { "entries" };
+    let mut text = format!(
+        "db/{}: {offered} {} offered, {kept} kept.",
+        result.file,
+        plural(offered)
+    );
+    for error in &result.errors {
+        text.push(' ');
+        text.push_str(error);
+        if let Some(expanded) = expand_type_name(error) {
+            text.push_str(&format!(" ({expanded})"));
+        }
+    }
+    one_line(&text)
+}
+
+/// Record what the server made of each mod's tables, for Settings to show.
+///
+/// Called once the map server is up, because that is when it has said so. A
+/// mod whose table was thrown away is still switched on and still has its
+/// other layers in effect, so this is a warning against the mod rather than a
+/// refusal of it.
+pub fn record_load_report(cfg: &Config, dk: &crate::docker::Docker) {
+    let build = cfg.state.join("modbuild/db");
+    let owners = read_owners(&build);
+    if owners.is_empty() {
+        let _ = fs::remove_file(report_path(&cfg.state));
+        return;
+    }
+    let log = dk.logs("ragnarok-map", "4000");
+    let mut problems: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for result in parse_table_results(&log) {
+        if result.accepted >= result.offered && result.errors.is_empty() {
+            continue;
+        }
+        let Some(owner) = owners.get(&result.file) else {
+            continue;
+        };
+        let text = describe(&result);
+        eprintln!("mods: {owner}: {text}");
+        problems.entry(owner.clone()).or_default().push(text);
+    }
+
+    let mut body = String::from("{");
+    for (i, (owner, list)) in problems.iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str(&crate::json::quote(owner));
+        body.push(':');
+        body.push('[');
+        for (j, text) in list.iter().enumerate() {
+            if j > 0 {
+                body.push(',');
+            }
+            body.push_str(&crate::json::quote(text));
+        }
+        body.push(']');
+    }
+    body.push('}');
+    let _ = fs::write(report_path(&cfg.state), body);
+}
+
+/// What the last start said about one mod's tables.
+fn load_report(state: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    let Ok(body) = fs::read_to_string(report_path(state)) else {
+        return out;
+    };
+    let Ok(value) = crate::json::parse(&body) else {
+        return out;
+    };
+    let crate::json::Value::Object(map) = value else {
+        return out;
+    };
+    for (name, entry) in map {
+        if let crate::json::Value::Array(items) = entry {
+            let list: Vec<String> = items
+                .into_iter()
+                .filter_map(|v| match v {
+                    crate::json::Value::String(s) => Some(s),
+                    _ => None,
+                })
+                .collect();
+            if !list.is_empty() {
+                out.insert(name, list);
+            }
+        }
+    }
+    out
+}
+
+pub fn list(cfg: &Config) -> Vec<[String; 10]> {
     let saved = read_settings(&cfg.state).unwrap_or_default();
+    let reported = load_report(&cfg.state);
     scan(cfg)
         .into_iter()
         .map(|m| {
@@ -1107,6 +1401,18 @@ pub fn list(cfg: &Config) -> Vec<[String; 9]> {
                 // values in force, as one JSON array. json::quote escapes every
                 // control character, so this cannot break the tab framing.
                 settings_json(&m.manifest, saved.get(&m.name)),
+                // What the server said about this mod's tables the last time
+                // it started, as a JSON array of sentences. Empty when it said
+                // nothing, and when the server has not started since the mod
+                // was installed -- Settings says which of the two it is.
+                match reported.get(&m.name) {
+                    None => String::from("[]"),
+                    Some(list) => {
+                        let items: Vec<String> =
+                            list.iter().map(|t| crate::json::quote(t)).collect();
+                        format!("[{}]", items.join(","))
+                    }
+                },
             ]
         })
         .collect()
@@ -1139,6 +1445,136 @@ fn write_list(state: &Path, file: &str, name: &str, present: bool, header: &str)
 
 #[cfg(test)]
 mod tests {
+
+    /// The real thing, escape codes and all: rAthena prints its status lines
+    /// without newlines and overwrites them in place, so several share one
+    /// physical line. Taken from a map server that had loaded the mod this was
+    /// written for.
+    const REAL_LOG: &str = "\x1b[1;32m[Status]\x1b[0m:\x1b[K Loading '\x1b[1;37mdb/import/skill_db.yml\x1b[0m'...\x1b[K\x1b[1;32m[Status]\x1b[0m:\x1b[K Loading '\x1b[1;37m1\x1b[0m' entries in '\x1b[1;37mdb/import/skill_db.yml\x1b[0m'\n\x1b[K\x1b[1;31m[Error]\x1b[0m:\x1b[K Node \"Id\" cannot be parsed as t.\n\x1b[1;31m[Error]\x1b[0m:\x1b[K Occurred in file '\x1b[1;37mdb/import/skill_db.yml\x1b[0m' on line 5 and column 4.\n\x1b[1;32m[Status]\x1b[0m:\x1b[K Done reading '\x1b[1;37m0\x1b[0m' entries in '\x1b[1;37mdb/import/skill_db.yml\x1b[0m'\x1b[K\n";
+
+    #[test]
+    fn a_rejected_table_is_read_out_of_the_server_log() {
+        let results = parse_table_results(REAL_LOG);
+        assert_eq!(results.len(), 1);
+        let only = &results[0];
+        assert_eq!(only.file, "skill_db.yml");
+        assert_eq!(only.offered, 1);
+        assert_eq!(only.accepted, 0);
+        assert_eq!(
+            only.errors,
+            vec![
+                "Node \"Id\" cannot be parsed as t.".to_string(),
+                "Occurred in file 'db/import/skill_db.yml' on line 5 and column 4.".to_string(),
+            ]
+        );
+        // "t" is what rAthena prints for a 16-bit number, because it formats
+        // the type with typeid().name(). Expanded, or the sentence ends in a
+        // letter the reader cannot act on.
+        assert_eq!(
+            describe(only),
+            "db/skill_db.yml: 1 entry offered, 0 kept. Node \"Id\" cannot be parsed as t. \
+             (t is a whole number) Occurred in file 'db/import/skill_db.yml' on line 5 and column 4."
+        );
+    }
+
+    #[test]
+    fn a_mangled_type_name_is_expanded_and_anything_else_left_alone() {
+        assert_eq!(
+            expand_type_name("Node \"Id\" cannot be parsed as t."),
+            Some("t is a whole number".to_string())
+        );
+        assert_eq!(
+            expand_type_name("Node \"Flag\" cannot be parsed as b."),
+            Some("b is true or false".to_string())
+        );
+        // MSVC prints the real name, and a name nobody recognises is left as
+        // it came rather than guessed at.
+        assert_eq!(expand_type_name("cannot be parsed as unsigned short."), None);
+        assert_eq!(expand_type_name("Some other complaint entirely."), None);
+    }
+
+    /// A table that loaded is not a problem and must not be reported as one,
+    /// or every start would accuse every mod.
+    #[test]
+    fn a_table_that_loaded_says_nothing() {
+        let log = "[Status]: Loading '3' entries in 'db/import/mob_db.yml'\n\
+                   [Status]: Done reading '3' entries in 'db/import/mob_db.yml'\n";
+        let results = parse_table_results(log);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].accepted, 3);
+        assert!(results[0].errors.is_empty());
+    }
+
+    /// Two mods, two tables, one broken. The errors belong to the table they
+    /// sit between and must not spread to the one that loaded.
+    #[test]
+    fn one_bad_table_does_not_implicate_the_next() {
+        let log = "[Status]: Loading '2' entries in 'db/import/item_db.yml'\n\
+                   [Error]: Node \"Id\" cannot be parsed as t.\n\
+                   [Status]: Done reading '1' entries in 'db/import/item_db.yml'\n\
+                   [Status]: Loading '5' entries in 'db/import/mob_db.yml'\n\
+                   [Status]: Done reading '5' entries in 'db/import/mob_db.yml'\n";
+        let results = parse_table_results(log);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].file, "item_db.yml");
+        assert_eq!(results[0].errors.len(), 1);
+        assert_eq!(results[1].file, "mob_db.yml");
+        assert!(results[1].errors.is_empty());
+    }
+
+    /// A development tree with no staged import stubs produces sixty of these.
+    /// None of them is a mod's fault, and none names a file a mod supplied, so
+    /// nothing here may pick them up.
+    #[test]
+    fn missing_import_stubs_are_not_a_mods_problem() {
+        let log = "[Status]: Loading 'db/import/instance_db.yml'...\
+                   [Error]: Failed to open INSTANCE_DB database file from 'db/import/instance_db.yml'.\n";
+        assert!(parse_table_results(log).is_empty());
+    }
+
+    /// Only `db/import` is ours. The stock tables load in the same log and
+    /// their counts are none of a mod's business.
+    #[test]
+    fn the_servers_own_tables_are_ignored() {
+        let log = "[Status]: Loading '1635' entries in 'db/re/skill_db.yml'\n\
+                   [Status]: Done reading '1635' entries in 'db/re/skill_db.yml'\n";
+        assert!(parse_table_results(log).is_empty());
+    }
+
+    /// The report survives the run that wrote it, because Settings is usually
+    /// read with the server stopped, and it comes back keyed by mod.
+    #[test]
+    fn the_report_round_trips_to_the_settings_window() {
+        let dir = std::env::temp_dir().join(format!("ro-modreport-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            report_path(&dir),
+            "{\"no-seed-cost\":[\"db/skill_db.yml: 1 entry offered, 0 kept.\"]}",
+        )
+        .unwrap();
+        let back = load_report(&dir);
+        assert_eq!(
+            back.get("no-seed-cost").map(|v| v.as_slice()),
+            Some(["db/skill_db.yml: 1 entry offered, 0 kept.".to_string()].as_slice())
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The merged tree is one directory; without this nothing in it says which
+    /// mod a complaint belongs to.
+    #[test]
+    fn ownership_survives_the_merge() {
+        let dir = std::env::temp_dir().join(format!("ro-modowners-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut owners = BTreeMap::new();
+        owners.insert("skill_db.yml".to_string(), "no-seed-cost".to_string());
+        owners.insert("mob_db.yml".to_string(), "harder-porings".to_string());
+        write_owners(&dir, &owners);
+        assert_eq!(read_owners(&dir), owners);
+        let _ = fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     fn setting(key: &str, value: SettingValue, min: f64, max: f64) -> Setting {

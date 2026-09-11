@@ -1638,7 +1638,7 @@ const handlers = {
 		// the app would not run it, and the difference is the whole point of
 		// having a reason to show.
 		return out.split('\n').filter(Boolean).map(l => {
-			const [state, name, description, reason, origin, version, author, grants, settings] = l.split('\t');
+			const [state, name, description, reason, origin, version, author, grants, settings, problems] = l.split('\t');
 			return {
 				name,
 				enabled: state === 'on',
@@ -1657,6 +1657,14 @@ const handlers = {
 				// older supervisor that does not write the field at all.
 				settings: (() => {
 					try { return JSON.parse(settings || '[]'); } catch { return []; }
+				})(),
+				// What the game server said about this mod's own tables the
+				// last time it started. A mod can be switched on, have every
+				// other layer in effect, and have had its db/ thrown away with
+				// only a line in a log nobody opens to say so -- which is the
+				// failure this carries out to Settings.
+				problems: (() => {
+					try { return JSON.parse(problems || '[]'); } catch { return []; }
 				})(),
 			};
 		});

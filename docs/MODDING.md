@@ -698,6 +698,26 @@ for a refusal instead:
 mods: my-island was not applied -- needs app >=1.0.7, and this is 1.0.6
 ```
 
+**Settings → Mods says when the server rejected one of your tables.** A `db/`
+file that the server could not read does not switch the mod off or refuse it:
+every other layer still applies, the box stays ticked, and only that one table
+is missing. So the mod is listed as on, with what the server said underneath:
+
+```
+Server could not read part of this mod — db/skill_db.yml: 1 entry offered,
+0 kept. Node "Id" cannot be parsed as t. (t is a whole number)
+Occurred in file 'db/import/skill_db.yml' on line 5 and column 4.
+```
+
+That is rAthena's own verdict, quoted, with the file and line it named. `t` is
+its name for a whole number, which is worth knowing because its message says
+only the letter — that one is a field wanting a number and given something
+else, such as a skill's `Id` written as `AM_CALLHOMUN` instead of `243`.
+
+It comes from the last time the server started, so start the server after
+installing a mod and then look. No line means the server did not complain, not
+that it has read anything.
+
 The server log is the next place to look. For a `db/` override:
 
 ```
