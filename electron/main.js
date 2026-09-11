@@ -911,6 +911,13 @@ const SETTINGS_DEFAULTS = {
 	// characters -- see db_volume() in stack/src/cmds.rs for why sharing them
 	// is not safe.
 	prerenewal: false,
+	// Where the game's text comes from, and with it the codepage every table
+	// the client ships is read through. kRO is Korean and the bundled
+	// ROenglishRE translation covers it, which is why English is the default;
+	// a Latin American or international client already has its own text and is
+	// better served reading that. See GameText in stack/src/assets.rs for why
+	// the text and the codepage are one setting rather than two.
+	game_text: 'english',
 };
 
 function getSettings() {
@@ -1755,6 +1762,23 @@ const handlers = {
 			`vm ram    ${getClientPaths().vm_ram_mib} MiB (default here: ${defaultVmRamMib()})`,
 
 		].join('\n'));
+
+		// What the host will and will not let the engine do: virtualisation,
+		// and whether Smart App Control will load an unsigned binary at all.
+		// Both are invisible from inside the app, both end in the same "the
+		// virtual machine did not start", and neither was ever in a bundle --
+		// so every report carried the symptom and none carried the cause. A
+		// player on Windows 10 with an AMD chip and a hypervisor switched off
+		// at boot produced a report indistinguishable from a feature that was
+		// simply never ticked, and the advice we gave was for the wrong one.
+		//
+		// The supervisor writes its own section headers here, so that one
+		// process answers both questions.
+		try {
+			lines.push(await runStack(['host-check']));
+		} catch (e) {
+			add('host', `could not read: ${e}`);
+		}
 
 		// Paths only: a client folder name is not a secret, and knowing whether
 		// the GRFs were found is most of triage.

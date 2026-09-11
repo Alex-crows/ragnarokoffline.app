@@ -21,10 +21,16 @@ window.ROConfigLocal = {
 			address: '127.0.0.1',
 			port: 6900,
 			version: 55,
-			// windows-949, not windows-1252. langtype picks the text codepage,
-			// and 12 (Brazil) renders every string the English overlay does not
-			// cover as mojibake ("¼¼»òÀ»"). 949 is ASCII-compatible, so English
-			// is untouched and leftover Korean renders as actual Korean.
+			// The codepage every table the client ships is read with, and
+			// `write_client_config` rewrites it to follow Settings -> Game text.
+			//
+			// 0 is windows-949, which is what the English translation wants:
+			// it is ASCII-compatible, so the overlay is untouched and whatever
+			// Korean it does not cover renders as actual Korean rather than
+			// mojibake ("¼¼»òÀ»"). With the overlay off and a Latin American
+			// or international client it becomes 12, which is windows-1252 --
+			// the other way round, a Spanish or Portuguese table read as
+			// windows-949 pairs its accented bytes up and comes out as Hangul.
 			langtype: 0,
 			packetver: 20221005,
 			renewal: true,

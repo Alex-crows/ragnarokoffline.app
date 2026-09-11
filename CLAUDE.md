@@ -107,6 +107,20 @@ looks there before asking the server again, keyed by filename. It survives
 restarts, so a mod that replaces a stock file can appear to do nothing while
 every status says it worked.
 
+### Looking at the database
+
+`ragnarok-stack sql "<query>"` reads it; `ragnarok-stack sql --write "<stmt>"`
+changes it. Reads run against a live server. Writes must not: rAthena keeps
+characters, homunculi, pets and inventories in memory and writes them back on
+save, so an edit made underneath a running map server is overwritten within the
+minute with nothing said. `--write` takes a backup and stops the game for you,
+which is the whole reason to use it rather than `docker exec`.
+
+The schema is `vendor/rathena/sql-files/main.sql`, and it is the code in
+`vendor/rathena/src/map/` that decides what a column means -- `homunculus.alive`
+is in the table and the char server neither reads nor writes it.
+[docs/DATABASE.md](docs/DATABASE.md) is the reference, with worked repairs.
+
 ## Testing
 
 - `cd stack && cargo test` — the supervisor's suite.

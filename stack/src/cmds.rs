@@ -2,6 +2,9 @@
 
 use crate::config::{data_root, home, lan_ip, Config, DB_CONTAINER, NET, SERVERS};
 use crate::docker::{older_than, Docker, Mount};
+// Every use of it is Windows-only; the module itself is not.
+#[cfg(windows)]
+use crate::host;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -217,7 +220,7 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
                 .map_err(|e| {
                     #[cfg(windows)]
                     if is_app_control_block(&e) {
-                        return app_control_help(&e);
+                        return host::app_control_help(&e);
                     }
                     e
                 })?;
@@ -233,8 +236,8 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
     // waiting to misread the failure. Only when our own binary is genuinely
     // unsigned: once signing lands this goes quiet on its own.
     #[cfg(windows)]
-    if sac_enforcing() && !pe_is_signed(&cfg.nebula) {
-        return Err(app_control_help(
+    if host::app_control_blocks(&cfg.nebula) {
+        return Err(host::app_control_help(
             "Smart App Control is enforcing, and this app is not signed yet",
         ));
     }
@@ -250,8 +253,8 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
     // arrives twenty seconds later as "agent did not become healthy", with the
     // real reason logged by libkrun and thrown away.
     #[cfg(windows)]
-    if whp_available() == Some(false) {
-        return Err(whp_help());
+    if host::whp_capability() == Some(false) {
+        return Err(host::blocked_help());
     }
 
     // Before starting it: an image that was damaged on the way in produces a
@@ -271,7 +274,7 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
         #[cfg(windows)]
         if let Err(e) = &repair {
             if is_app_control_block(e) {
-                return Err(app_control_help(e));
+                return Err(host::app_control_help(e));
             }
         }
         let _ = repair;
@@ -282,7 +285,7 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
     if let Err(e) = nebula(cfg, &["up"]) {
         #[cfg(windows)]
         if is_app_control_block(&e) {
-            return Err(app_control_help(&e));
+            return Err(host::app_control_help(&e));
         }
         // Closing the game and opening it again is the ordinary way to hit
         // this, and the previous engine needs about a minute to finish
@@ -804,7 +807,7 @@ fn is_app_control_block(msg: &str) -> bool {
         || ((msg.contains("0xC0000135")
             || msg.contains("-1073741515")
             || msg.contains("os error 126"))
-            && sac_enforcing())
+            && host::app_control_state() == host::AppControl::Enforcing)
 }
 
 /// Is the Microsoft Visual C++ runtime present?
@@ -853,160 +856,6 @@ fn vc_runtime_help(reason: &str) -> String {
          Nothing is wrong with your computer or your install. The app window \
          opens without it because only the parts that run the game servers need \
          it, which is why the failure shows up a few seconds in."
-    )
-}
-
-/// Is the Windows Hypervisor Platform actually usable?
-///
-/// `Some(false)` means the feature is off; `None` means we could not tell and
-/// the caller should say nothing.
-///
-/// This asks the same question libkrun asks, in the same way, rather than
-/// inferring it. Win32_ComputerSystem.HypervisorPresent is not the same thing:
-/// it is true whenever any hypervisor is running -- Hyper-V for Credential
-/// Guard or Memory Integrity sets it -- and we told a player their
-/// virtualisation was fine on that basis while WHP was off and the guest could
-/// not boot. Get-WindowsOptionalFeature would answer correctly but needs
-/// elevation, and WinHvPlatform.dll is present either way, so its existence
-/// proves nothing (checked on Windows 10 19045 and Windows 11 26200: present
-/// with the feature both enabled and disabled).
-///
-/// Loaded dynamically. Linking WinHvPlatform.dll at load time would mean a
-/// Windows without it could not start this binary at all -- 0xC0000135, the
-/// failure we spent an evening on already.
-#[cfg(windows)]
-fn whp_available() -> Option<bool> {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LoadLibraryA(name: *const u8) -> *mut c_void;
-        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
-    }
-    // WHvCapabilityCodeHypervisorPresent
-    const HYPERVISOR_PRESENT: u32 = 0x0000_0000;
-    unsafe {
-        let module = LoadLibraryA(b"WinHvPlatform.dll\0".as_ptr());
-        if module.is_null() {
-            return None;
-        }
-        let proc = GetProcAddress(module, b"WHvGetCapability\0".as_ptr());
-        if proc.is_null() {
-            return None;
-        }
-        let get_capability: unsafe extern "system" fn(u32, *mut c_void, u32, *mut u32) -> i32 =
-            std::mem::transmute(proc);
-        let mut present: u32 = 0;
-        let mut written: u32 = 0;
-        let hr = get_capability(
-            HYPERVISOR_PRESENT,
-            &mut present as *mut u32 as *mut c_void,
-            4,
-            &mut written,
-        );
-        if hr != 0 || written != 4 {
-            return None;
-        }
-        Some(present != 0)
-    }
-}
-
-#[cfg(windows)]
-fn whp_help() -> String {
-    "The Windows Hypervisor Platform is switched off, and this app needs it to \
-     run its virtual machine.\n\n\
-     Turn it on:\n\n\
-     \x20   Press Windows+R, run `optionalfeatures`, tick \"Windows Hypervisor \
-     Platform\", then restart the computer.\n\n\
-     This is not your BIOS and it is not your antivirus. It is a Windows \
-     feature that is off by default, and nothing else will start the virtual \
-     machine until it is on."
-        .to_string()
-}
-
-/// Is Smart App Control enforcing right now?
-///
-/// Read rather than inferred from a failure. Under enforcement an unsigned
-/// binary is refused at load with 0xC0000135, which is indistinguishable from
-/// a genuinely missing DLL -- so the state has to be checked, not guessed from
-/// the corpse. Values: 0 off, 1 enforcement, 2 evaluation.
-#[cfg(windows)]
-fn sac_enforcing() -> bool {
-    let out = Command::new("reg")
-        .args([
-            "query",
-            r"HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy",
-            "/v",
-            "VerifiedAndReputablePolicyState",
-        ])
-        .output();
-    match out {
-        Ok(o) => {
-            let t = String::from_utf8_lossy(&o.stdout);
-            // "VerifiedAndReputablePolicyState    REG_DWORD    0x1"
-            t.split_whitespace()
-                .last()
-                .map(|v| v.eq_ignore_ascii_case("0x1"))
-                .unwrap_or(false)
-        }
-        Err(_) => false,
-    }
-}
-
-/// Does this PE carry an Authenticode signature?
-///
-/// The certificate table is data directory 4 in the optional header; a size of
-/// zero means nothing signed it. Parsed here rather than shelling out to
-/// PowerShell, because this runs on every start and a process spawn to answer
-/// "did we sign our own binary" is a poor trade.
-#[cfg(windows)]
-fn pe_is_signed(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = fs::File::open(path) else { return false };
-    let mut buf = [0u8; 4];
-    // e_lfanew at 0x3C points at the PE header.
-    if f.seek(SeekFrom::Start(0x3C)).is_err() || f.read_exact(&mut buf).is_err() {
-        return false;
-    }
-    let pe = u32::from_le_bytes(buf) as u64;
-    let mut magic = [0u8; 2];
-    if f.seek(SeekFrom::Start(pe + 24)).is_err() || f.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    // PE32 puts the data directories at +96, PE32+ at +112.
-    let dir_off = match u16::from_le_bytes(magic) {
-        0x10b => pe + 24 + 96,
-        0x20b => pe + 24 + 112,
-        _ => return false,
-    };
-    // Directory 4 is the certificate table: 8 bytes in, size is the second u32.
-    let mut entry = [0u8; 8];
-    if f.seek(SeekFrom::Start(dir_off + 4 * 8)).is_err() || f.read_exact(&mut entry).is_err() {
-        return false;
-    }
-    u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) != 0
-}
-
-#[cfg(windows)]
-fn app_control_help(reason: &str) -> String {
-    format!(
-        "{reason}\n\n\
-         Windows blocked this app from running. Its files are not code-signed \
-         yet, and Smart App Control refuses programs it does not recognise.\n\n\
-         This is not a problem with your computer, and it is not a virus -- it \
-         is a signature we have not bought yet. It affects people on newer \
-         Windows 11 installs, because Smart App Control is on by default there \
-         and switches itself off on older machines.\n\n\
-         To play now, turn Smart App Control off:\n\n\
-         \x20   Windows Security -> App & browser control -> \
-         Smart App Control settings -> Off\n\n\
-         Read this part before you do: turning it off is PERMANENT. Windows \
-         will not let it be switched back on without reinstalling Windows. If \
-         you would rather not, waiting for a signed release costs you nothing \
-         but time.\n\n\
-         We are working on signing, which fixes this properly and needs no \
-         change on your side. It takes a few weeks -- the certificate authority \
-         has to verify our identity first. Progress:\n\n\
-         \x20   https://github.com/Flux159/ragnarokoffline.app/issues/8"
     )
 }
 
@@ -1111,55 +960,19 @@ fn engine_failure_help(reason: &str) -> String {
         );
     }
 
-    // Ask Windows whether a hypervisor is running at all. Cheap, and it splits
-    // the two failures that look identical: firmware virtualisation off (fixed
-    // in the BIOS) versus the Windows feature off (fixed with a checkbox).
-    let present = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent",
-        ])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if present {
-        // Deliberately not "virtualisation is fine". HypervisorPresent only
-        // says some hypervisor is running -- Hyper-V for Credential Guard or
-        // Memory Integrity sets it too -- and it says nothing about whether
-        // the Windows Hypervisor Platform, which is what actually runs this
-        // virtual machine, is available. Claiming the machine is fine sent a
-        // player looking everywhere except the one switch that was off.
-        format!(
-            "{reason}\n\n\
-             Windows reports a hypervisor is running, so this is not your \
-             BIOS. The other thing that has to be on is the Windows \
-             Hypervisor Platform, which is separate and off by default:\n\n\
-             \x20   Press Windows+R, run `optionalfeatures`, tick \
-             \"Windows Hypervisor Platform\", then restart.\n\n\
-             If it is already ticked, Settings has a Report a problem button. \
-             The logs it collects now include the virtual machine's own \
-             startup error, which says what stopped it."
-        )
-    } else {
-        format!(
-            "{reason}\n\n\
-             The virtual machine could not start: Windows reports no hypervisor \
-             running. Two things have to be on, and they are fixed differently.\n\n\
-             1. Virtualisation in your BIOS/UEFI. Open Task Manager \
-             (Ctrl+Shift+Esc), go to Performance then CPU, and look for \
-             \"Virtualization\". If it says Disabled, turn on Intel VT-x, AMD-V \
-             or SVM Mode in your BIOS. Windows cannot enable this for you.\n\n\
-             2. The Windows Hypervisor Platform. Press Windows+R, run \
-             \"optionalfeatures\", tick \"Windows Hypervisor Platform\", and \
-             restart. Or, in a Command Prompt opened as Administrator:\n\n\
-             \x20   dism.exe /Online /Enable-Feature /FeatureName:HypervisorPlatform /All\n\n\
-             Windows 11 Home is fine for this -- it is not the Hyper-V role, \
-             which is Pro only, but the same feature WSL2 and Docker Desktop use."
-        )
-    }
+    // Ask the machine what is actually wrong rather than reading it back out
+    // of a failure that cannot be told from three others. Three unrelated
+    // faults land here identically -- virtualisation off in firmware, the
+    // Windows Hypervisor Platform feature off, and the hypervisor switched off
+    // at boot -- and the old text named only the middle one, so anyone with
+    // either of the other two was told to tick a box that was already ticked.
+    //
+    // Costs a couple of process spawns, on a path where the start has already
+    // failed and the alternative is a wrong answer.
+    #[cfg(windows)]
+    return format!("{reason}\n\n{}", host::probe().advice());
+    #[cfg(not(windows))]
+    unreachable!("every non-Windows platform returned above");
 }
 
 /// Load the bundled image tarball when the images are not already present.
@@ -1856,12 +1669,217 @@ pub fn status(dk: &Docker) {
     print!("{out}");
 }
 
-pub fn backup(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> {
+/// Run SQL against the running era's game database.
+///
+/// The app never calls this. It exists because questions like "is that
+/// homunculus still attached to my character?" have no answer anywhere in the
+/// UI, and the database is three layers down -- a container, inside a microVM,
+/// on a network that publishes no port -- so before this there was no way to
+/// look that did not involve rebuilding this path by hand.
+///
+/// Reads run against the live server. Writes do not: `--write` stops the game
+/// first, because rAthena holds characters, homunculi and pets in memory and
+/// writes them back on save, so an edit made underneath a running map server
+/// is either ignored or overwritten within the minute. That is the single
+/// most expensive thing to get wrong here, and it is invisible when it
+/// happens -- the UPDATE reports a row changed and the game changes nothing.
+pub fn sql(cfg: &Config, dk: &Docker, args: &[String]) -> Result<(), String> {
+    let mut write = false;
+    let mut from_file: Option<String> = None;
+    let mut words: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--write" => write = true,
+            "--file" => {
+                let path = args.get(i + 1).ok_or("--file needs a path")?;
+                from_file = Some(fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?);
+                i += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("unknown option {other}")),
+            other => words.push(other),
+        }
+        i += 1;
+    }
+
+    let script = match from_file {
+        Some(body) if !words.is_empty() => {
+            let _ = body;
+            return Err("Give either --file or a statement, not both".into());
+        }
+        Some(body) => body,
+        // argv, or stdin when there is nothing in argv: a heredoc is the only
+        // comfortable way to type a statement carrying quotes.
+        None if words.is_empty() => {
+            let mut body = String::new();
+            std::io::stdin()
+                .take(crate::docker::SQL_INPUT_LIMIT as u64 + 1)
+                .read_to_string(&mut body)
+                .map_err(|e| format!("reading the statement: {e}"))?;
+            body
+        }
+        None => words.join(" "),
+    };
+    if script.trim().is_empty() {
+        return Err("No statement given. Pass one as an argument, with --file, or on stdin.".into());
+    }
+
+    // Before anything is started or stopped: this is a check on what was
+    // typed, and it should answer without a server running.
+    if !write {
+        read_only(&script)?;
+    }
+
+    // Which era's database is actually mounted, not which one settings prefer:
+    // the two disagree after a failed era switch, and the wrong answer here
+    // means editing the characters of a world the player is not in.
     crate::accounts::verify_era(cfg, dk, crate::service_credentials::era(cfg))?;
-    crate::accounts::with_servers_stopped(cfg, dk, || backup_snapshot(cfg, dk, dest))
+
+    let output = if write {
+        crate::accounts::with_servers_stopped(cfg, dk, "SQL", || {
+            // The same safety copy `restore` takes, and for the same reason:
+            // whatever is about to run was typed by hand, and MyISAM -- which
+            // is what `char` and `homunculus` are -- has no transaction to
+            // roll back.
+            let safety = cfg.state.join("backups").join(format!(
+                "before-sql-{}-{}.sql",
+                crate::service_credentials::era(cfg),
+                crate::private_fs::random_hex(8)?
+            ));
+            backup_snapshot(cfg, dk, &safety.to_string_lossy(), false)?;
+            eprintln!("saved {} first", safety.display());
+            dk.console_sql(&script)
+        })?
+    } else {
+        dk.console_sql(&script)?
+    };
+
+    // Rows to stdout, everything else to stderr, so the output stays a
+    // pipeable TSV table for whoever or whatever is reading it.
+    print!("{output}");
+    if write {
+        eprintln!("applied; game services are back as they were");
+    }
+    Ok(())
 }
 
-fn backup_snapshot(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> {
+/// Statements a read may begin with.
+///
+/// `WITH` is absent on purpose: MariaDB lets a common table expression lead
+/// into UPDATE and DELETE, so it is not the read-only keyword it looks like.
+const READS: [&str; 5] = ["select", "show", "describe", "desc", "explain"];
+
+fn read_only(script: &str) -> Result<(), String> {
+    for word in leading_words(script) {
+        if !READS.contains(&word.to_ascii_lowercase().as_str()) {
+            let named = if word.is_empty() { "That".into() } else { format!("`{word}`") };
+            return Err(format!(
+                "{named} is not a read, and sql reads by default. Run it again with --write, \
+                 which saves a backup, stops the game, applies the statements and starts it again."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The first word of every statement in a script.
+///
+/// Not a SQL parser and not a sandbox: it is here so that a mistyped UPDATE is
+/// refused instead of run, which is the failure that actually happens. All it
+/// has to know is where one statement ends and the next begins, and that means
+/// recognising the `;` that does not count -- inside a string, inside an
+/// identifier, inside a comment.
+///
+/// A statement that starts with anything but a bare word yields an empty
+/// string, which no keyword matches, so the guard refuses it rather than
+/// guessing.
+fn leading_words(script: &str) -> Vec<String> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut captured = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if ch == '/' && chars.get(i + 1) == Some(&'*') {
+            // `/*!` is MySQL's executable comment: the body runs, so it is read
+            // as code and only the marker is skipped.
+            if chars.get(i + 2) == Some(&'!') {
+                i += 3;
+                while chars.get(i).is_some_and(char::is_ascii_digit) {
+                    i += 1;
+                }
+                continue;
+            }
+            i += 2;
+            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+            continue;
+        }
+        // `--` opens a comment only when whitespace follows it; `a--b` is a
+        // subtraction.
+        if ch == '#'
+            || (ch == '-' && chars.get(i + 1) == Some(&'-')
+                && chars.get(i + 2).is_none_or(|c| c.is_whitespace()))
+        {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' && ch != '`' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == ch {
+                    // A doubled quote is a literal one, not the end.
+                    if chars.get(i + 1) == Some(&ch) {
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+            captured = true;
+            continue;
+        }
+        if ch == ';' {
+            out.push(std::mem::take(&mut word));
+            captured = false;
+            i += 1;
+            continue;
+        }
+        if !captured {
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+                word.push(ch);
+            } else if !word.is_empty() || !ch.is_whitespace() {
+                captured = true;
+            }
+        }
+        i += 1;
+    }
+    if captured || !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+pub fn backup(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> {
+    crate::accounts::verify_era(cfg, dk, crate::service_credentials::era(cfg))?;
+    crate::accounts::with_servers_stopped(cfg, dk, "backup", || backup_snapshot(cfg, dk, dest, true))
+}
+
+/// `announce` is off for the safety copies taken on someone else's behalf, so
+/// their line cannot land in the middle of output a caller is parsing.
+fn backup_snapshot(cfg: &Config, dk: &Docker, dest: &str, announce: bool) -> Result<(), String> {
     let backups = cfg.state.join("backups");
     fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
     let tmp = format!("ragnarokmac-{}-{}.sql", std::process::id(), crate::private_fs::random_hex(12)?);
@@ -1893,7 +1911,9 @@ fn backup_snapshot(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> 
     crate::private_fs::export_file(&staged, Path::new(dest))?;
     let _ = fs::remove_file(&staged);
     dk.quiet(["exec", DB_CONTAINER, "rm", "-f", &format!("/backups/{tmp}")]);
-    println!("wrote {dest} ({})", human(size));
+    if announce {
+        println!("wrote {dest} ({})", human(size));
+    }
     Ok(())
 }
 
@@ -1906,7 +1926,7 @@ pub fn restore(cfg: &Config, dk: &Docker, src: &str) -> Result<(), String> {
     let backups = cfg.state.join("backups");
     crate::private_fs::directory(&backups)?;
     let safety = backups.join(format!("before-restore-{}-{}.sql", crate::service_credentials::era(cfg), crate::private_fs::random_hex(8)?));
-    backup_snapshot(cfg, dk, &safety.to_string_lossy())?;
+    backup_snapshot(cfg, dk, &safety.to_string_lossy(), true)?;
     let tmp = format!("restore-{}-{}.sql", std::process::id(), crate::private_fs::random_hex(12)?);
     let staged = backups.join(&tmp);
     if staged.exists() { crate::private_fs::protect(&staged, false)?; }
@@ -2041,6 +2061,58 @@ mod tests {
             port_holders(err)[0].home,
             PathBuf::from("/Users/p/Ragnarok Offline (old)/nebula"),
         );
+    }
+
+    /// The guard's whole job: an edit typed where a read was meant.
+    #[test]
+    fn a_read_is_a_read_and_a_write_is_not() {
+        assert!(read_only("SELECT * FROM homunculus WHERE char_id = 150000").is_ok());
+        assert!(read_only("  show tables ").is_ok());
+        assert!(read_only("EXPLAIN DELETE FROM `char`").is_ok());
+        assert!(read_only("UPDATE `char` SET homun_id = 0").is_err());
+        assert!(read_only("DELETE FROM homunculus").is_err());
+        // WITH is deliberately not a read keyword: MariaDB accepts a CTE in
+        // front of DELETE.
+        assert!(read_only("WITH x AS (SELECT 1) SELECT * FROM x").is_err());
+    }
+
+    /// The second statement is the one that gets you, and it is the one a
+    /// single-statement check would miss.
+    #[test]
+    fn every_statement_is_checked_not_just_the_first() {
+        assert!(read_only("SELECT 1; DELETE FROM homunculus").is_err());
+        assert!(read_only("SELECT 1;\nSELECT 2;\n").is_ok());
+    }
+
+    /// A semicolon that does not end a statement, in each of the three places
+    /// one can hide.
+    #[test]
+    fn punctuation_inside_quotes_and_comments_does_not_split() {
+        assert!(read_only("SELECT 'a; DROP'").is_ok());
+        assert!(read_only("SELECT \"a; DROP\"").is_ok());
+        assert!(read_only("SELECT `odd;name` FROM t").is_ok());
+        assert!(read_only("SELECT 'it\\'s; fine'").is_ok());
+        assert!(read_only("SELECT 'two''quotes; here'").is_ok());
+        assert!(read_only("SELECT 1 -- ; DELETE FROM t\n").is_ok());
+        assert!(read_only("SELECT 1 # ; DELETE FROM t\n").is_ok());
+        assert!(read_only("/* ; DELETE FROM t */ SELECT 1").is_ok());
+        assert!(read_only("-- a note\nSELECT 1").is_ok());
+    }
+
+    /// `/*! ... */` is run by the server, so it is read as code here too.
+    #[test]
+    fn an_executable_comment_is_not_a_comment() {
+        assert!(read_only("/*!40000 DELETE FROM `char` */").is_err());
+        assert!(read_only("/*! SELECT 1 */").is_ok());
+    }
+
+    /// Anything that is not a plain keyword is refused rather than guessed at.
+    #[test]
+    fn a_statement_that_starts_with_no_keyword_is_refused() {
+        assert!(read_only("(SELECT 1)").is_err());
+        assert!(read_only("`char`").is_err());
+        assert!(leading_words("   \n -- nothing but a comment\n  ").is_empty());
+        assert!(leading_words("SELECT 1;  ").len() == 1);
     }
 
     /// Every other failure yields nothing, so the caller reports it as it

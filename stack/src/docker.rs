@@ -20,6 +20,13 @@ pub struct Docker {
     state: PathBuf,
 }
 
+/// Both directions of a SQL call are bounded, because both cross a pipe into
+/// the microVM and neither has a caller who benefits from an unbounded one.
+pub const SQL_INPUT_LIMIT: usize = 16 * 1024;
+pub const SQL_OUTPUT_LIMIT: usize = 64 * 1024;
+const TOO_LONG: &str = "That is more than 16 KiB of SQL. Send it as fewer, shorter statements.";
+const TOO_MUCH: &str = "That returned more than 64 KiB. Narrow it with a LIMIT, or ask for fewer columns.";
+
 /// Storage attached to a container.
 ///
 /// Windows has no virtiofs under nebula, so a host directory cannot be bind
@@ -257,31 +264,40 @@ impl Docker {
     }
 
     pub fn exec_sql(&self, sql: &str) -> Result<String, String> {
-        self.sql(sql, &self.sql_auth()?, true)
+        self.sql(sql, &self.sql_auth()?, true, false)
+    }
+
+    /// The one caller whose statements a person wrote, so the one caller that
+    /// is told what the database actually said. A typo has to come back as the
+    /// syntax error it is; "the private database operation failed" sends
+    /// someone hunting a broken install for a missing comma.
+    pub fn console_sql(&self, sql: &str) -> Result<String, String> {
+        self.sql(sql, &self.sql_auth()?, true, true)
     }
 
     /// No query or generated password enters argv, logs or raw error text.
     pub fn private_sql(&self, sql: &str) -> Result<String, String> {
-        self.sql(sql, &self.sql_auth()?, false)
+        self.sql(sql, &self.sql_auth()?, false, false)
     }
 
     pub fn root_sql(&self, sql: &str, legacy: bool) -> Result<String, String> {
         let auth = if legacy { vec!["-uroot".into(), "-pragnarok".into()] }
             else { vec!["--defaults-extra-file=/run/ragnarok-private/root.cnf".into()] };
-        self.sql(sql, &auth, false)
+        self.sql(sql, &auth, false, false)
     }
 
-    fn sql(&self, sql: &str, auth: &[String], headers: bool) -> Result<String, String> {
+    fn sql(&self, sql: &str, auth: &[String], headers: bool, report: bool) -> Result<String, String> {
         self.require_private_sql()?;
         let failure = || "The private database operation failed. Start the server to finish any pending credential migration, or restore its matching credential journal and backup.".to_string();
-        if sql.len() > 16 * 1024 { return Err(failure()); }
+        if sql.len() > SQL_INPUT_LIMIT { return Err(TOO_LONG.into()); }
         let mut args: Vec<String> = ["exec", "-i", "ragnarok-db", "mariadb"].iter().map(|s| s.to_string()).collect();
         args.extend(auth.iter().cloned());
         args.extend(["--protocol=TCP", "-h127.0.0.1", "--batch", "--raw"].iter().map(|s| s.to_string()));
         if !headers { args.push("--skip-column-names".into()); }
         args.push("ragnarok".into());
         let mut child = self.base().args(args)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .stdin(Stdio::piped()).stdout(Stdio::piped())
+            .stderr(if report { Stdio::piped() } else { Stdio::null() })
             .spawn().map_err(|_| failure())?;
         let mut stdin = child.stdin.take().ok_or_else(failure)?;
         let input = sql.as_bytes().to_vec();
@@ -289,7 +305,16 @@ impl Docker {
         let stdout = child.stdout.take().ok_or_else(failure)?;
         let reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            stdout.take(64 * 1024 + 1).read_to_end(&mut bytes).map(|_| bytes)
+            stdout.take(SQL_OUTPUT_LIMIT as u64 + 1).read_to_end(&mut bytes).map(|_| bytes)
+        });
+        // Drained on its own thread for the same reason stdout is: a client
+        // that fills the pipe and blocks would never reach the wait below.
+        let complaint = child.stderr.take().map(|mut stderr| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                let _ = (&mut stderr).take(8 * 1024).read_to_end(&mut bytes);
+                bytes
+            })
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let status = loop {
@@ -301,8 +326,11 @@ impl Docker {
         };
         let wrote = writer.join().ok().and_then(Result::ok).is_some();
         let bytes = reader.join().ok().and_then(Result::ok).ok_or_else(failure)?;
-        if !wrote || !status.map(|s| s.success()).unwrap_or(false) || bytes.len() > 64 * 1024 {
-            return Err(failure());
+        let said = complaint.and_then(|t| t.join().ok()).unwrap_or_default();
+        if bytes.len() > SQL_OUTPUT_LIMIT { return Err(TOO_MUCH.into()); }
+        if !wrote || !status.map(|s| s.success()).unwrap_or(false) {
+            let said = String::from_utf8_lossy(&said).trim().to_string();
+            return Err(if report && !said.is_empty() { said } else { failure() });
         }
         String::from_utf8(bytes).map_err(|_| failure())
     }

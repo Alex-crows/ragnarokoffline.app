@@ -85,9 +85,11 @@ Open **Task Manager** (Ctrl+Shift+Esc) → **Performance** → **CPU**, and look
 **Virtualization** on the right.
 
 - *Enabled* — good, go to step 2.
-- *Disabled* — turn it on in your BIOS/UEFI. It is usually called
-  **Intel VT-x**, **AMD-V** or **SVM Mode**, and the key to enter setup is shown
-  briefly when the machine starts. Nothing on Windows can enable this for you.
+- *Disabled* — turn it on in your BIOS/UEFI, under Advanced → CPU
+  Configuration. On AMD it is **SVM Mode**, and most AMD motherboards ship with
+  it off; on Intel it is **Intel Virtualization Technology**, sometimes written
+  **VT-x**. The key to enter setup is shown briefly when the machine starts, and
+  is usually Del or F2. Nothing on Windows can enable this for you.
 - *You do not see the line at all* — a hypervisor is already running, which
   means it is on. Go to step 2.
 
@@ -111,13 +113,45 @@ Then restart the machine.
 Pro-only — it is the same feature WSL2 and Docker Desktop use, and it is
 available on Home.
 
+**4. Has the hypervisor been switched off at boot?**
+
+This is the one that survives everything above, and it is why "I already ticked
+it and restarted, and I get the same error" is a common reply. Guides for
+emulators, VirtualBox and various anti-cheat problems tell people to run
+`bcdedit /set hypervisorlaunchtype off`. That setting is permanent, it is
+invisible from anywhere in the Windows interface, and it stops the hypervisor
+starting no matter how many times the feature is ticked or the machine
+restarted.
+
+In a **Command Prompt opened as Administrator**:
+
+```
+bcdedit /enum {current} | findstr -i hypervisorlaunchtype
+```
+
+Nothing printed means it is unset, which is the default and is fine. `Off` is
+the fault. Put it back and restart:
+
+```
+bcdedit /set hypervisorlaunchtype auto
+```
+
+**What the app can see for itself.** From 1.1.8 the diagnostics bundle carries
+all of this — the firmware setting, whether any hypervisor is running, whether
+the platform API answers, and the boot setting where it can be read — under
+`===== virtualisation =====`, along with a one-line reading of it. The boot
+setting is the only one that needs an administrator, so a bundle will say
+`unreadable without an administrator` there and print the command to ask for.
+
 To check what Windows itself thinks, in PowerShell:
 
 ```powershell
 (Get-CimInstance Win32_ComputerSystem).HypervisorPresent
 ```
 
-`True` means a hypervisor is running and the app should work.
+`True` means a hypervisor is running. It is not on its own proof the app will
+work: it is true whenever *any* hypervisor is running, including the one Memory
+Integrity uses, and says nothing about the Windows Hypervisor Platform.
 
 ## Windows: it starts, then hangs with nothing happening
 
@@ -160,6 +194,27 @@ can copy.
 Turn down **How busy** in Settings, or switch off **Fake players** entirely. The
 AI characters are the only part of the server that costs meaningful CPU, and the
 game itself runs on very little.
+
+## A character, homunculus or pet is stuck in a state with no button for it
+
+A homunculus that is nowhere to be seen but cannot be called, vaporized,
+resurrected or replaced. A character the server still thinks is online. A pet
+that will not come out. These are rows that have got into a combination the
+game has no way to reach or leave, and there is nothing in Settings for them.
+
+The server's database can be read and repaired from a terminal with the
+supervisor the app already ships:
+
+```sh
+"$HOME/Library/Application Support/Ragnarok Offline/runtime/bin/ragnarok-stack" \
+  sql "SELECT char_id, name, homun_id FROM \`char\`"
+```
+
+**[docs/DATABASE.md](DATABASE.md)** has the paths for each platform, what is in
+which table, and worked repairs — the homunculus one included. Writes go
+through `--write`, which saves a backup and stops the game first, because an
+edit made underneath a running map server is silently overwritten.
+
 ## An asset server is already using port 3338
 
 The app will not reuse or stop a server it cannot identify as its own. Quit

@@ -38,6 +38,7 @@ const sidebarItems = [
       { label: 'Playing with friends', path: 'friends' },
       { label: 'Making mods', path: 'modding' },
       { label: 'Troubleshooting', path: 'troubleshooting' },
+      { label: 'Repairing the database', path: 'database' },
     ],
   },
 ];
