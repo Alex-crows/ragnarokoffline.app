@@ -32,6 +32,10 @@ characters for each.
 `rdata.grf` is optional. Older clients split renewal content into it; newer ones
 ship a single `data.grf` with everything merged in, and either is fine.
 
+A Latin American client is one of the newer kind: one `data.grf`, plus an
+`event.grf` holding the seasonal versions of a few towns. Point the third
+picker at `event.grf` if you want those, or leave it empty.
+
 If you only want to join a friend who is hosting a server, see
 [Hosting and playing with friends on your LAN](#hosting-and-playing-with-friends-on-your-lan)
 — you do not need the assets at all.
