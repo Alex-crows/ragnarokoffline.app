@@ -65,6 +65,9 @@ impl Vendor {
 pub enum Diagnosis {
     /// The firmware switch is off. Windows cannot fix this and neither can we.
     FirmwareOff,
+    /// The processor itself does not report the virtualisation extensions.
+    /// Rare, and unfixable, so it must never be said on a guess.
+    NoCpuSupport,
     /// Firmware is on, no hypervisor is running: the feature is off, waiting
     /// for a restart, or `hypervisorlaunchtype` is off.
     NotLaunching,
@@ -91,20 +94,31 @@ pub fn classify(
     if whp == Some(true) {
         return Diagnosis::Unknown;
     }
-    // Firmware first: it is the only one of the three that the other two cannot
-    // mask, and acting on it means a trip into the BIOS that nobody should make
-    // on a maybe. VMMonitorModeExtensions counts here too -- it is the same
-    // switch seen from the other side, and on some boards Windows fills in one
-    // of the two and not the other.
-    if firmware == Some(false) || vm_monitor_mode == Some(false) {
+    // Firmware first: it is the only one of these the others cannot mask, and
+    // acting on it means a trip into the BIOS that nobody should make on a
+    // maybe.
+    if firmware == Some(false) {
         return Diagnosis::FirmwareOff;
+    }
+    // VMMonitorModeExtensions is NOT the same reading seen from the other side,
+    // which is what this code first assumed. It is what the silicon can do, and
+    // it stays true with the BIOS switch off: a player whose firmware was
+    // disabled reported it as Yes in the same breath as Windows refusing to
+    // install Hyper-V for want of firmware support. So it only answers a
+    // different and much rarer question -- a processor that cannot do this at
+    // all -- and it must not be allowed to stand in for the switch.
+    if vm_monitor_mode == Some(false) {
+        return Diagnosis::NoCpuSupport;
     }
     match hypervisor_running {
         // Something holds the CPU but will not lend us the platform API.
         Some(true) => Diagnosis::Occupied,
-        // Firmware is fine and nothing is running: either the feature is off
-        // or it has been told not to start. Unelevated reads cannot split
-        // those two, and the advice covers both rather than picking one.
+        // Nothing is running. Either the feature is off or it has been told not
+        // to start; unelevated reads cannot split those two, so the advice
+        // covers both rather than picking one.
+        //
+        // Reached with `firmware` either true or unreadable, and those are not
+        // the same thing to say out loud -- see `advice`.
         Some(false) => Diagnosis::NotLaunching,
         None => Diagnosis::Unknown,
     }
@@ -112,7 +126,7 @@ pub fn classify(
 
 /// What to tell the player, in the order they should act.
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn advice(diagnosis: Diagnosis, vendor: &Vendor) -> String {
+pub fn advice(diagnosis: Diagnosis, vendor: &Vendor, firmware_confirmed: bool) -> String {
     match diagnosis {
         Diagnosis::FirmwareOff => format!(
             "Virtualisation is switched off in your computer's firmware, and no \
@@ -127,10 +141,28 @@ pub fn advice(diagnosis: Diagnosis, vendor: &Vendor) -> String {
             vendor.bios_setting()
         ),
         Diagnosis::NotLaunching => {
-            // Said only where it is true. On an AMD machine the BIOS is the
-            // first place people are sent by every forum answer, and this is
-            // the one message that can tell them it is already correct.
-            let amd = if vendor == &Vendor::Amd {
+            // Only where Windows actually said so. This reassurance is the most
+            // load-bearing sentence here -- it is the one that stops an AMD
+            // owner going back into a BIOS that is already right -- and for
+            // exactly that reason it must never be said on a missing reading.
+            // VirtualizationFirmwareEnabled comes back empty on some machines,
+            // and telling someone whose SVM really is off that their BIOS is
+            // fine is worse than telling them nothing.
+            let opener = if firmware_confirmed {
+                "Virtualisation is on in your firmware, so this is not your BIOS. What \
+                 is not happening is the hypervisor starting, and two separate things \
+                 stop that."
+            } else {
+                "Windows would not tell us whether virtualisation is on in your \
+                 firmware, so check that first: Task Manager (Ctrl+Shift+Esc), \
+                 Performance, CPU, and \"Virtualization\" on the right. On a Windows \
+                 that is not in English the label is translated, but it sits in the \
+                 same place. If it reads Disabled, that is the whole problem and it is \
+                 fixed in the BIOS, not here.\n\n\
+                 If it reads Enabled, then what is not happening is the hypervisor \
+                 starting, and two separate things stop that."
+            };
+            let amd = if firmware_confirmed && vendor == &Vendor::Amd {
                 "\n\nWorth knowing on an AMD machine: Windows reports your firmware \
                  virtualisation as on, so SVM Mode is already enabled and the BIOS is \
                  not what to change here."
@@ -138,9 +170,7 @@ pub fn advice(diagnosis: Diagnosis, vendor: &Vendor) -> String {
                 ""
             };
             format!(
-                "Virtualisation is on in your firmware, so this is not your BIOS. \
-                 What is not happening is the hypervisor starting, and two separate \
-                 things stop that.{amd}\n\n\
+                "{opener}{amd}\n\n\
                  1. The Windows feature. Press Windows+R, run `optionalfeatures`, and \
                  tick BOTH \"Windows Hypervisor Platform\" and \"Virtual Machine \
                  Platform\". Then restart -- properly restart, because the hypervisor \
@@ -160,6 +190,15 @@ pub fn advice(diagnosis: Diagnosis, vendor: &Vendor) -> String {
                  \x20   bcdedit /enum {{current}} | findstr -i hypervisorlaunchtype"
             )
         }
+        Diagnosis::NoCpuSupport => format!(
+            "Windows reports that this processor does not offer the virtualisation \
+             extensions the virtual machine needs.\n\n\
+             Check the BIOS before believing that, because some machines report it \
+             this way when the setting is merely switched off: look for {}. If it is \
+             there and already on, then the processor is genuinely too old for this \
+             and no setting will change it.",
+            vendor.bios_setting()
+        ),
         Diagnosis::Occupied =>
             "A hypervisor is already running on this machine, but it will not give \
              this app the Windows Hypervisor Platform, which is what runs the virtual \
@@ -189,9 +228,12 @@ pub fn reading(diagnosis: Diagnosis) -> &'static str {
     match diagnosis {
         Diagnosis::FirmwareOff =>
             "virtualisation is off in firmware; the BIOS setting has to be changed",
+        Diagnosis::NoCpuSupport =>
+            "the processor does not report the virtualisation extensions; check the \
+             BIOS anyway, some machines read this way when it is only switched off",
         Diagnosis::NotLaunching =>
-            "firmware is on and no hypervisor is running: the feature is off, waiting \
-             for a restart, or hypervisorlaunchtype is off",
+            "no hypervisor is running and the firmware switch is not the cause: the \
+             feature is off, waiting for a restart, or hypervisorlaunchtype is off",
         Diagnosis::Occupied =>
             "a hypervisor is running but will not lend us the platform API: the \
              feature is off, or anti-cheat holds it exclusively",
@@ -448,7 +490,7 @@ impl Probe {
 
     /// What to tell the player, in the order they should act.
     pub fn advice(&self) -> String {
-        advice(self.diagnosis(), &self.vendor)
+        advice(self.diagnosis(), &self.vendor, self.firmware == Some(true))
     }
 }
 
@@ -706,10 +748,10 @@ mod tests {
             classify(Some(false), Some(false), Some(false), Some(false)),
             Diagnosis::FirmwareOff
         );
-        // Boards that fill in one of the two readings and not the other still
-        // land here rather than sending someone to optionalfeatures.
+        // A missing monitor-mode reading must not stop the firmware switch
+        // being reported, and does not.
         assert_eq!(
-            classify(Some(false), None, Some(false), Some(false)),
+            classify(Some(false), Some(false), None, Some(false)),
             Diagnosis::FirmwareOff
         );
     }
@@ -720,7 +762,7 @@ mod tests {
     fn firmware_on_and_nothing_running_is_the_boot_setting() {
         let d = classify(Some(false), Some(true), Some(true), Some(false));
         assert_eq!(d, Diagnosis::NotLaunching);
-        let text = advice(d, &Vendor::Amd);
+        let text = advice(d, &Vendor::Amd, true);
         // Both remedies, because unelevated reads cannot tell them apart.
         assert!(text.contains("optionalfeatures"));
         assert!(text.contains("bcdedit /set hypervisorlaunchtype auto"));
@@ -733,7 +775,7 @@ mod tests {
     fn a_running_hypervisor_that_will_not_share_names_anti_cheat() {
         let d = classify(Some(false), Some(true), Some(true), Some(true));
         assert_eq!(d, Diagnosis::Occupied);
-        assert!(advice(d, &Vendor::Unknown).contains("Vanguard"));
+        assert!(advice(d, &Vendor::Unknown, true).contains("Vanguard"));
     }
 
     #[test]
@@ -755,16 +797,16 @@ mod tests {
     /// sends someone hunting a menu for a word that is not in it.
     #[test]
     fn the_bios_setting_is_named_per_vendor() {
-        let amd = advice(Diagnosis::FirmwareOff, &Vendor::Amd);
+        let amd = advice(Diagnosis::FirmwareOff, &Vendor::Amd, false);
         assert!(amd.contains("SVM Mode"));
         assert!(!amd.contains("Intel"));
 
-        let intel = advice(Diagnosis::FirmwareOff, &Vendor::Intel);
+        let intel = advice(Diagnosis::FirmwareOff, &Vendor::Intel, false);
         assert!(intel.contains("Intel Virtualization Technology"));
         assert!(!intel.contains("SVM Mode"));
 
         // Unknown silicon gets every name rather than a guess.
-        let other = advice(Diagnosis::FirmwareOff, &Vendor::Unknown);
+        let other = advice(Diagnosis::FirmwareOff, &Vendor::Unknown, false);
         assert!(other.contains("VT-x") && other.contains("SVM Mode"));
     }
 
@@ -781,6 +823,60 @@ mod tests {
     /// Turning Smart App Control off is irreversible and lowers protection for
     /// every other program on the machine. The message may explain how, but it
     /// must recommend waiting for the signed build first.
+    /// The report this came from: an AMD machine with SVM off in the BIOS.
+    /// Windows had it right all along -- the Hyper-V checkbox refused to
+    /// install for want of firmware support -- and this is the reading that
+    /// has to land on the BIOS rather than on optionalfeatures.
+    #[test]
+    fn svm_off_in_the_bios_is_diagnosed_as_the_bios() {
+        // VM Monitor Mode Extensions stays true with the switch off: that
+        // machine reported "Sim" for it in the same breath as Windows
+        // refusing Hyper-V for want of firmware virtualisation.
+        let d = classify(Some(false), Some(false), Some(true), Some(false));
+        assert_eq!(d, Diagnosis::FirmwareOff);
+        let text = advice(d, &Vendor::Amd, false);
+        assert!(text.contains("SVM Mode"));
+        assert!(!text.contains("optionalfeatures"));
+    }
+
+    /// The failure that would have made this worse than saying nothing.
+    /// VirtualizationFirmwareEnabled comes back empty on some machines; if it
+    /// had on that player's, the old code would have told them their BIOS was
+    /// already correct while SVM was switched off.
+    #[test]
+    fn an_unread_firmware_switch_is_never_reported_as_fine() {
+        let d = classify(Some(false), None, Some(true), Some(false));
+        assert_eq!(d, Diagnosis::NotLaunching);
+        let text = advice(d, &Vendor::Amd, false);
+        assert!(!text.contains("SVM Mode is already enabled"));
+        assert!(!text.contains("this is not your BIOS"));
+        // It sends them to look, and says the label is translated elsewhere.
+        assert!(text.contains("Task Manager"));
+        assert!(text.contains("translated"));
+        // Still carries both real remedies underneath.
+        assert!(text.contains("bcdedit /set hypervisorlaunchtype auto"));
+    }
+
+    /// Only a positive reading earns the reassurance.
+    #[test]
+    fn a_confirmed_firmware_switch_still_says_the_bios_is_fine() {
+        let text = advice(Diagnosis::NotLaunching, &Vendor::Amd, true);
+        assert!(text.contains("SVM Mode is already enabled"));
+        assert!(text.contains("this is not your BIOS"));
+    }
+
+    /// A processor that genuinely cannot do it is not a BIOS instruction, but
+    /// it hedges, because some machines report it this way when it is merely
+    /// switched off.
+    #[test]
+    fn no_processor_support_is_hedged_rather_than_asserted() {
+        let d = classify(Some(false), None, Some(false), Some(false));
+        assert_eq!(d, Diagnosis::NoCpuSupport);
+        let text = advice(d, &Vendor::Intel, false);
+        assert!(text.contains("Check the BIOS before believing that"));
+        assert!(text.contains("Intel Virtualization Technology"));
+    }
+
     #[test]
     fn app_control_help_does_not_recommend_switching_it_off() {
         let text = app_control_help("blocked");
@@ -792,4 +888,5 @@ mod tests {
         assert!(text.contains("issues/8"));
     }
 }
+
 
