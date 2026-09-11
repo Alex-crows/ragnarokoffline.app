@@ -939,6 +939,61 @@ elif s.count(old) == 1:
 else:
     sys.exit("WinStatsCommon.js: tooltip initialization no longer matches (%d hits); re-check the patch" % s.count(old))
 
+# 0015 - Fall back to msgstringtable's other name when the primary one is empty.
+#
+# roBrowser loads data/msgstringtable.txt, which is where every system message
+# lives: the chat tab labels, "You are dead", every notice the server sends. A
+# client that does not have that file is handled -- the loader falls through to
+# a CSV -- but a client that has it and left it *empty* is not, because a
+# successful read of nothing still counts as an answer.
+#
+# That is exactly what a Latin American client ships. Its msgstringtable.txt is
+# zero bytes and the real table, 52 KB of Portuguese, sits beside it as
+# msgstringtablel.txt. Without this, Settings -> Game text -> your client's own
+# text comes up with "NO MSG 12!" for the chat tabs and "NO MSG 2580" for
+# anything the server says.
+#
+# Only reached when the primary table produced nothing, so a client with a
+# normal msgstringtable.txt loads exactly what it loaded before and never asks
+# for the second name.
+p = rb / "src/DB/DBManager.js"
+s = p.read_text()
+old = """		loadTable(
+			'data/msgstringtable.txt',
+			'#',
+			1,
+			(_index, val) => {
+				MsgStringTable[_index] = val;
+			},
+			() => loadCSV('data/msgstringtable.csv', MsgStringTable, 0, 1, loadmsg),
+			true
+		);"""
+new = """		const readMsgString = (_index, val) => {
+			MsgStringTable[_index] = val;
+		};
+		const loadMsgStringCSV = () =>
+			loadCSV('data/msgstringtable.csv', MsgStringTable, 0, 1, loadmsg);
+		loadTable(
+			'data/msgstringtable.txt',
+			'#',
+			1,
+			readMsgString,
+			// An empty msgstringtable.txt is a miss, not an answer: newer clients
+			// keep the file and put the table under a second name.
+			() =>
+				MsgStringTable.length
+					? loadMsgStringCSV()
+					: loadTable('data/msgstringtablel.txt', '#', 1, readMsgString, loadMsgStringCSV, true),
+			true
+		);"""
+if "data/msgstringtablel.txt" in s:
+    print("DBManager.js msgstringtable fallback already patched")
+elif s.count(old) == 1:
+    p.write_text(s.replace(old, new, 1))
+    print("patched DBManager.js (an empty msgstringtable falls back to the second name)")
+else:
+    sys.exit("DBManager.js: msgstringtable loading no longer matches (%d hits); re-check the patch" % s.count(old))
+
 PY
 
 python3 "$ROOT/scripts/patch-client-controls.py" "$ROOT" "$RB"

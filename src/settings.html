@@ -161,6 +161,25 @@
        or fourth jobs. Switching restarts the server.</p>
   </div>
 
+  <h2>Game text</h2>
+  <div class="panel">
+    <label><span>Item, quest and NPC text</span><select id="game_text">
+      <option value="english">English translation</option>
+      <option value="client_western">Your client's own text &mdash; Western</option>
+      <option value="client_korean">Your client's own text &mdash; Korean</option>
+    </select></label>
+    <p class="note" id="game-text-status" hidden style="margin:8px 0 0; color: var(--text)"></p>
+    <p class="note">The app ships an English translation and lays it over your client's own
+       files. Turn it off and the game reads the text your client came with, which is what
+       you want if that client is not Korean &mdash; a Latin American one is in Spanish and
+       Portuguese already.</p>
+    <p class="note"><b>Western</b> covers Latin American, international, Brazilian and
+       European clients. <b>Korean</b> is for kRO. The two differ only in how the client's
+       text is decoded, and the wrong one turns every accented letter into gibberish, so
+       pick the one that matches the client you downloaded. Changing this rebuilds the
+       assets and restarts the server.</p>
+  </div>
+
   <h2>Startup</h2>
   <div class="panel">
     <label>
@@ -734,6 +753,42 @@ async function chooseEra(pre) {
 }
 $('era-re').onclick = () => chooseEra(false);
 $('era-pre').onclick = () => chooseEra(true);
+
+// Which text the assets were built with, so the select can be put back if
+// applying fails. Same reasoning as eraIsPre: one source of truth, not the DOM.
+let gameText = 'english';
+
+// Applied on change rather than behind an Apply button, for the same reason
+// the era is: it rebuilds the served assets and restarts the server, and a
+// pending choice that looks applied and is not is worse than a wait.
+$('game_text').onchange = async () => {
+  const chosen = $('game_text').value;
+  if (chosen === gameText) return;
+  const status = $('game-text-status');
+  $('game_text').disabled = true;
+  status.hidden = false;
+  status.innerHTML = '<span class="spinner"></span>Rebuilding the game files…';
+  try {
+    const s = await invoke('get_settings');
+    await invoke('save_settings', { settings: { ...s, game_text: chosen } });
+    gameText = chosen;
+    status.textContent = chosen === 'english'
+      ? 'The English translation is on. Log in again to see it.'
+      : 'Using your client\'s own text. Log in again to see it.';
+    log('game text: ' + chosen);
+  } catch (e) {
+    // The rebuild may have failed after the setting was written. Show what is
+    // actually saved rather than an invented rollback.
+    const saved = await invoke('get_settings').catch(() => ({ game_text: gameText }));
+    gameText = saved.game_text || 'english';
+    $('game_text').value = gameText;
+    status.textContent = `Could not rebuild the game files: ${String(e)}. Saved setting: ${gameText}.`;
+    log(String(e));
+  } finally {
+    $('game_text').disabled = false;
+    refresh();
+  }
+};
 
 async function refresh() {
   await refreshMode();
@@ -1353,6 +1408,8 @@ invoke('get_settings').then(s => {
   paintRegistration(s);
   $('delete-delay').value = s.instant_character_deletion ? 'instant' : 'delayed';
   setEra(!!s.prerenewal);
+  gameText = s.game_text || 'english';
+  $('game_text').value = gameText;
   $('zeny_from_mobs').checked = !!s.zeny_from_mobs;
   $('open_settings_first').checked = !!s.open_settings_first;
   $('population_enable').checked = !!s.population_enable;

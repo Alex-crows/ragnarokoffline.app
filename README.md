@@ -333,6 +333,15 @@ kRO is Korean, and the translation comes from
 [**ROenglishRE**](https://github.com/llchrisll/ROenglishRE). Its text tables ship
 inside the app, so the game is in English out of the box with no extra step.
 
+**If your client is not Korean, you can turn this off.** Settings → **Game
+text** switches between the English translation and the text your client came
+with, which is the one to use for a Latin American download that is already in
+Spanish and Portuguese. It also picks how that text is decoded, so choose
+*Western* for a Latin American, international or European client and *Korean*
+for kRO. A few system messages the server sends by number show as `NO MSG 2580`
+that way, because newer clients keep those in a format roBrowser does not read;
+names, dialogue and quest text all come across.
+
 If you also have that project's supplementary art pack — `official_data.grf`, which
 contains no text at all, only translated sprites and textures — put it in the same
 folder as your other GRFs. The app picks it up automatically and gives it priority

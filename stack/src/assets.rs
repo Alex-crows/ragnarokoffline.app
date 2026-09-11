@@ -8,6 +8,75 @@ use crate::config::Config;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Where the client's text comes from.
+///
+/// Off is not simply "skip the overlay". roBrowser decodes every table a
+/// client ships using one codepage, chosen by `servers[].langtype`, and the
+/// English overlay is ASCII -- so Korean (windows-949) is the right reading
+/// while that overlay is in front of everything. Take it away and a Latin
+/// American client's own Spanish and Portuguese tables are windows-1252,
+/// where every accented byte is a valid CP949 lead byte: `Configuração`
+/// pairs its bytes up with their neighbours and arrives as Hangul. So the
+/// choice of text and the choice of codepage are one choice, and this is it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GameText {
+    /// ROenglishRE over the client's own files.
+    English,
+    /// The client's own files, read as windows-1252: Latin American,
+    /// international, Brazilian and European clients.
+    ClientWestern,
+    /// The client's own files, read as windows-949: kRO.
+    ClientKorean,
+}
+
+impl GameText {
+    fn translated(self) -> bool {
+        self == GameText::English
+    }
+
+    /// roBrowser's `servers[].langtype`. 12 is SERVICETYPE_BRAZIL, which is
+    /// one of the eight the client maps to windows-1252; 0 is Korea.
+    fn langtype(self) -> u32 {
+        match self {
+            GameText::ClientWestern => 12,
+            _ => 0,
+        }
+    }
+
+    /// Part of the overlay fingerprint, so switching clears the client's own
+    /// file cache. Without that the browser keeps serving the tables it
+    /// already has and the setting appears to do nothing.
+    fn as_str(self) -> &'static str {
+        match self {
+            GameText::English => "english",
+            GameText::ClientWestern => "client_western",
+            GameText::ClientKorean => "client_korean",
+        }
+    }
+}
+
+/// Read the setting, defaulting to the English translation.
+///
+/// A value nobody wrote is refused rather than read as the default: the only
+/// way to get one is a hand-edited settings.json, and quietly rebuilding the
+/// assets in English would look exactly like the setting being ignored.
+pub fn game_text(cfg: &Config) -> Result<GameText, String> {
+    const ERROR: &str = "Cannot read the game text setting. Repair settings.json before starting the server; no assets were rebuilt.";
+    let settings = crate::registration::settings(&cfg.state).map_err(|_| ERROR)?;
+    match settings.get("game_text") {
+        None | Some(crate::json::Value::Null) => Ok(GameText::English),
+        Some(crate::json::Value::String(value)) => match value.as_str() {
+            "english" => Ok(GameText::English),
+            "client_western" => Ok(GameText::ClientWestern),
+            "client_korean" => Ok(GameText::ClientKorean),
+            other => Err(format!(
+                "Unknown game text setting {other:?}. Choose one in Settings; no assets were rebuilt."
+            )),
+        },
+        Some(_) => Err(ERROR.into()),
+    }
+}
+
 /// Small overlays are owned copies. Multi-gigabyte archives and music are
 /// read in place through private configuration; no filesystem links are needed.
 fn readable_path(path: &Path, directory: bool) -> Result<PathBuf, String> {
@@ -86,9 +155,12 @@ pub fn link(cfg: &Config, args: &[String]) -> Result<(), String> {
     let ai = first_dir(&[client_dir.join("AI"), client_dir.join("dll_exe/AI")])
         .map(|p| readable_path(&p, true))
         .transpose()?;
+    let text = game_text(cfg)?;
     let translation = cfg.root.join("vendor/ROenglishRE/Translation");
-    for sub in ["data", "SystemEN"] {
-        readable_path(&translation.join("Renewal").join(sub), true)?;
+    if text.translated() {
+        for sub in ["data", "SystemEN"] {
+            readable_path(&translation.join("Renewal").join(sub), true)?;
+        }
     }
 
     let tx = crate::asset_transaction::Transaction::begin(cfg)?;
@@ -125,20 +197,34 @@ pub fn link(cfg: &Config, args: &[String]) -> Result<(), String> {
 
     // An owned translation snapshot makes both era selection and rollback
     // independent of old symlinks or mutable directories outside this stage.
+    //
+    // `data/` is staged even when there is nothing to put in it: the asset
+    // server names DATA_OVERRIDE_PATH in its startup report, and a directory
+    // that is not there reads as a fault rather than as a choice.
     let en = server_root.join(".translation");
-    for sub in ["data", "SystemEN"] {
-        copy_over(&translation.join("Renewal").join(sub), &en.join(sub))?;
-        if crate::cmds::is_prerenewal(cfg) {
-            copy_over(&translation.join("Pre-Renewal").join(sub), &en.join(sub))?;
+    fs::create_dir_all(en.join("data")).map_err(|e| e.to_string())?;
+    if text.translated() {
+        for sub in ["data", "SystemEN"] {
+            copy_over(&translation.join("Renewal").join(sub), &en.join(sub))?;
+            if crate::cmds::is_prerenewal(cfg) {
+                copy_over(&translation.join("Pre-Renewal").join(sub), &en.join(sub))?;
+            }
         }
     }
     let merged = server_root.join("System");
-    copy_over(&en.join("SystemEN"), &merged)?;
+    if text.translated() {
+        copy_over(&en.join("SystemEN"), &merged)?;
+    }
     if let Some(sys) = first_dir(&[client_dir.join("System"), client_dir.join("dll_exe/System")]) {
         for e in entries(&sys)? {
             let name = e.file_name();
             let n = name.to_string_lossy();
-            if n.starts_with("itemInfo") || n.starts_with("OngoingQuestInfoList") {
+            // The English item and quest tables win while they are in
+            // front; without them the client's own are the only copies there
+            // are, and skipping them leaves the game with no item names.
+            if text.translated()
+                && (n.starts_with("itemInfo") || n.starts_with("OngoingQuestInfoList"))
+            {
                 continue;
             }
             let dst = merged.join(&name);
@@ -152,15 +238,17 @@ pub fn link(cfg: &Config, args: &[String]) -> Result<(), String> {
             }
         }
     }
-    copy_file(
-        &en.join("SystemEN/LuaFiles514/itemInfo.lua"),
-        &merged.join("itemInfo.lua"),
-    )?;
-    copy_file(
-        &en.join("SystemEN/OngoingQuests.lub"),
-        &merged.join("OngoingQuestInfoList.lub"),
-    )?;
-    copy_over(&en.join("SystemEN"), &server_root.join("SystemEN"))?;
+    if text.translated() {
+        copy_file(
+            &en.join("SystemEN/LuaFiles514/itemInfo.lua"),
+            &merged.join("itemInfo.lua"),
+        )?;
+        copy_file(
+            &en.join("SystemEN/OngoingQuests.lub"),
+            &merged.join("OngoingQuestInfoList.lub"),
+        )?;
+        copy_over(&en.join("SystemEN"), &server_root.join("SystemEN"))?;
+    }
     copy_data_aliased(
         &cfg.root.join("client-assets/data"),
         &server_root.join("data"),
@@ -168,6 +256,7 @@ pub fn link(cfg: &Config, args: &[String]) -> Result<(), String> {
     let (plugins, item_tables) = overlay_mods(cfg, &server_root, &merged)?;
     let mut fingerprint = 0xcbf2_9ce4_8422_2325;
     fnv(&mut fingerprint, b"owned-assets-v2");
+    fnv(&mut fingerprint, text.as_str().as_bytes());
     fnv(&mut fingerprint, overlay_fingerprint(cfg).as_bytes());
     hash_tree(&mut fingerprint, &translation, Path::new("translation"));
     hash_tree(
@@ -197,7 +286,7 @@ pub fn link(cfg: &Config, args: &[String]) -> Result<(), String> {
         format!("{fingerprint:016x}"),
     )
     .map_err(|e| e.to_string())?;
-    write_client_config(cfg, &server_root, &plugins, &item_tables)?;
+    write_client_config(cfg, &server_root, &plugins, &item_tables, text)?;
     copy_file(
         &cfg.root.join("config/index.html"),
         &server_root.join("index.html"),
@@ -567,6 +656,7 @@ fn write_client_config(
     web: &Path,
     plugins: &[(String, String)],
     item_tables: &[String],
+    text: GameText,
 ) -> Result<(), String> {
     let src = cfg.root.join("config/Config.local.js");
     let body = fs::read_to_string(&src).map_err(|e| format!("reading {}: {e}", src.display()))?;
@@ -578,6 +668,14 @@ fn write_client_config(
         body.replace("renewal: true,", "renewal: false,")
     } else {
         body
+    };
+    // The codepage every client table is read with. The template is Korean,
+    // which is right whenever the English overlay is in front of it; see
+    // GameText for why the two cannot be chosen separately.
+    let body = if text.langtype() == 0 {
+        body
+    } else {
+        body.replace("langtype: 0,", &format!("langtype: {},", text.langtype()))
     };
     // `customItemInfo` replaces the client's default list rather than adding to
     // it, so the base table has to be named first or every stock item loses its
@@ -740,6 +838,94 @@ mod tests {
         missing[2] = client.join("unplugged.grf").to_str().unwrap().to_string();
         assert!(link(&cfg, &missing).unwrap_err().contains("unplugged.grf"));
         assert_eq!(fs::read(client.join("data.grf")).unwrap(), b"archive");
+        fs::remove_dir_all(cfg.state.parent().unwrap()).unwrap();
+    }
+
+    /// Turning the translation off has to take the whole of it away, not just
+    /// the `data/` overlay: with the English tables gone, the client's own
+    /// item and quest tables are the only ones left and must stop being
+    /// skipped. The codepage moves with them, because a Western client's own
+    /// text is unreadable under the Korean one.
+    #[test]
+    fn the_clients_own_text_replaces_the_translation_and_its_codepage() {
+        let cfg = fixture_config("gametext");
+        let client = cfg.state.parent().unwrap().join("client");
+        for (path, text) in [
+            ("data.grf", "archive"),
+            ("System/itemInfo.lub", "itens do cliente"),
+            ("System/OngoingQuestInfoList_True.lub", "missões"),
+            ("System/font.ttf", "font"),
+        ] {
+            write(&client.join(path), text);
+        }
+        let en = cfg.root.join("vendor/ROenglishRE/Translation");
+        write(&en.join("Renewal/data/table.txt"), "renewal table");
+        write(
+            &en.join("Renewal/SystemEN/LuaFiles514/itemInfo.lua"),
+            "English items",
+        );
+        write(
+            &en.join("Renewal/SystemEN/OngoingQuests.lub"),
+            "English quests",
+        );
+        write(
+            &cfg.root.join("config/Config.local.js"),
+            "window.ROConfigLocal = {\nrenewal: true,\nlangtype: 0,\n};\n",
+        );
+        write(&cfg.root.join("config/index.html"), "game entry");
+        let args = vec![client.join("data.grf").to_str().unwrap().to_string()];
+
+        // Default: the translation is in front and the client's own tables are
+        // skipped rather than allowed to overwrite it.
+        link(&cfg, &args).unwrap();
+        let english_id = fs::read_to_string(cfg.state.join("assets/overlay.id")).unwrap();
+        assert_eq!(
+            fs::read_to_string(cfg.state.join("assets/System/itemInfo.lua")).unwrap(),
+            "English items"
+        );
+        assert!(cfg.state.join("assets/.translation/data/table.txt").exists());
+        assert!(fs::read_to_string(cfg.state.join("assets/Config.local.js"))
+            .unwrap()
+            .contains("langtype: 0,"));
+
+        write(&cfg.state.join("settings.json"), "{\"game_text\":\"client_western\"}");
+        link(&cfg, &args).unwrap();
+        // No English anywhere, and the override directory is still a directory
+        // so the asset server does not report it as missing.
+        assert!(!cfg.state.join("assets/System/itemInfo.lua").exists());
+        assert!(!cfg.state.join("assets/SystemEN").exists());
+        assert!(!cfg.state.join("assets/.translation/data/table.txt").exists());
+        assert!(cfg.state.join("assets/.translation/data").is_dir());
+        // The client's own tables, no longer skipped.
+        assert_eq!(
+            fs::read_to_string(cfg.state.join("assets/System/itemInfo.lub")).unwrap(),
+            "itens do cliente"
+        );
+        assert_eq!(
+            fs::read_to_string(cfg.state.join("assets/System/OngoingQuestInfoList_True.lub"))
+                .unwrap(),
+            "missões"
+        );
+        let config = fs::read_to_string(cfg.state.join("assets/Config.local.js")).unwrap();
+        assert!(config.contains("langtype: 12,"), "{config}");
+        // The client caches by filename, so the overlay fingerprint has to move
+        // or the browser keeps serving the English tables it already has.
+        assert_ne!(
+            fs::read_to_string(cfg.state.join("assets/overlay.id")).unwrap(),
+            english_id
+        );
+
+        // Same files, Korean reading: only the codepage differs.
+        write(&cfg.state.join("settings.json"), "{\"game_text\":\"client_korean\"}");
+        link(&cfg, &args).unwrap();
+        assert!(fs::read_to_string(cfg.state.join("assets/Config.local.js"))
+            .unwrap()
+            .contains("langtype: 0,"));
+        assert!(!cfg.state.join("assets/System/itemInfo.lua").exists());
+
+        // A value nobody wrote is refused rather than read as the default.
+        write(&cfg.state.join("settings.json"), "{\"game_text\":\"portuguese\"}");
+        assert!(link(&cfg, &args).unwrap_err().contains("portuguese"));
         fs::remove_dir_all(cfg.state.parent().unwrap()).unwrap();
     }
 
@@ -946,7 +1132,7 @@ mod tests {
             // shape the loader sees never depends on whether options exist.
             ("plain".to_string(), String::new()),
         ];
-        write_client_config(&cfg, &web, &plugins, &[]).unwrap();
+        write_client_config(&cfg, &web, &plugins, &[], GameText::English).unwrap();
         let body = fs::read_to_string(web.join("Config.local.js")).unwrap();
         assert!(
             body.contains("'wasd-movement': { path: 'plugins/wasd-movement/index', pars: { \"show_controls_button\": false } }"),

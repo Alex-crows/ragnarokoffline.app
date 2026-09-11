@@ -911,6 +911,13 @@ const SETTINGS_DEFAULTS = {
 	// characters -- see db_volume() in stack/src/cmds.rs for why sharing them
 	// is not safe.
 	prerenewal: false,
+	// Where the game's text comes from, and with it the codepage every table
+	// the client ships is read through. kRO is Korean and the bundled
+	// ROenglishRE translation covers it, which is why English is the default;
+	// a Latin American or international client already has its own text and is
+	// better served reading that. See GameText in stack/src/assets.rs for why
+	// the text and the codepage are one setting rather than two.
+	game_text: 'english',
 };
 
 function getSettings() {
