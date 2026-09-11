@@ -994,6 +994,54 @@ elif s.count(old) == 1:
 else:
     sys.exit("DBManager.js: msgstringtable loading no longer matches (%d hits); re-check the patch" % s.count(old))
 
+# 0016 - Drag and drop into the cart did nothing, the same way 0010 did.
+#
+# Dragging an item from the inventory or the storage onto the cart window was
+# silently ignored. Right-clicking the item and using the menu worked, which is
+# what made this look like a quirk of the cart rather than a bug.
+#
+# Identical cause to the equipment window in 0010, one window along. The cart
+# registers a drop handler and then a dragover handler that only stops
+# propagation:
+#
+#     this._host.addEventListener('drop', onDrop);
+#     this._host.addEventListener('dragover', e => e.stopImmediatePropagation());
+#
+# Under the HTML5 drag-and-drop model an element becomes a drop target only if
+# its dragover handler *cancels* the event. Without preventDefault the browser
+# never fires `drop`, so onDrop below it -- which handles Storage and Inventory
+# sources, asks for a quantity on a stack, and calls reqMoveItemToCart -- has
+# never once run.
+#
+# The cart is the only item window in the tree that does this. Storage and Trade
+# both call stopImmediatePropagation and preventDefault on their host, and the
+# inventory does the same behind its hostDropPreventDefault flag, which V2 and
+# V3 set. That asymmetry is why cart -> inventory already worked while
+# inventory -> cart did not, which is exactly how it was reported.
+#
+# Anchored on the pair of registrations, including the comment above them, so
+# this cannot silently land on some other dragover handler in the same file.
+p = rb / "src/UI/Components/CartItems/CartItems.js"
+s = p.read_text()
+old = """	// on drop item
+	this._host.addEventListener('drop', onDrop);
+	this._host.addEventListener('dragover', e => e.stopImmediatePropagation());"""
+new = """	// on drop item
+	this._host.addEventListener('drop', onDrop);
+	this._host.addEventListener('dragover', e => {
+		e.stopImmediatePropagation();
+		// A drop only fires on a target whose dragover cancelled the event.
+		// Without this the cart is never a drop target and onDrop never runs.
+		e.preventDefault();
+	});"""
+if "the cart is never a drop target" in s:
+    print("CartItems.js drag-and-drop already patched")
+elif s.count(old) == 1:
+    p.write_text(s.replace(old, new, 1))
+    print("patched CartItems.js (drag and drop into the cart)")
+else:
+    sys.exit("CartItems.js: the host drop registrations no longer match (%d hits); re-check the patch" % s.count(old))
+
 PY
 
 python3 "$ROOT/scripts/patch-client-controls.py" "$ROOT" "$RB"
