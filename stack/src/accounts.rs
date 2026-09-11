@@ -135,7 +135,7 @@ pub(crate) fn verify_era(cfg: &Config, dk: &Docker, era: &str) -> Result<(), Str
     // era switch. Inspect the actual volume, under the lifecycle operation lock.
     let inspected = dk
         .output(["inspect", "ragnarok-db"])
-        .map_err(|_| "Start this era's server before managing accounts")?;
+        .map_err(|_| "Start this era's server first")?;
     let parsed = json::parse(&inspected).map_err(|_| "Cannot verify the running database")?;
     let Value::Array(containers) = parsed else {
         return Err("Cannot verify the running database".into());
@@ -200,9 +200,14 @@ fn list(dk: &Docker, era: &str) -> Result<String, String> {
 /// Stop all game sessions before writing: rAthena can save an in-memory login
 /// record and overwrite a concurrent password change. Restart only the services
 /// that were running. The database and all account/character IDs stay intact.
+///
+/// `what` names the operation in the two messages a player can see, because
+/// the same guarantee now covers account edits, backups and hand-written SQL,
+/// and "no account update was attempted" is a lie in two of those three.
 pub(crate) fn with_servers_stopped<T>(
     cfg: &Config,
     dk: &Docker,
+    what: &str,
     operation: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
     crate::crashes::capture_all(cfg, dk);
@@ -212,8 +217,7 @@ pub(crate) fn with_servers_stopped<T>(
     for service in ["ragnarok-map", "ragnarok-char", "ragnarok-login"] {
         if dk.is_running(service) {
             if dk.output(["stop", service]).is_err() || dk.is_running(service) {
-                result =
-                    Err("Could not stop game sessions; no account update was attempted".into());
+                result = Err(format!("Could not stop game sessions; the {what} was not attempted"));
                 break;
             }
             stopped.push(service);
@@ -237,7 +241,7 @@ pub(crate) fn with_servers_stopped<T>(
     }
     match updated {
         Ok(value) if restarted => Ok(value),
-        Ok(_) => Err("The account was updated, but game services are not ready. Start the server to reconnect.".into()),
+        Ok(_) => Err(format!("The {what} completed, but game services are not ready. Start the server to reconnect.")),
         Err(error) => Err(error),
     }
 }
@@ -404,7 +408,7 @@ pub fn run(cfg: &Config, dk: &Docker) -> Result<(), String> {
         crate::hosting::require_game_policy(cfg, dk)?;
         update()?
     } else {
-        with_servers_stopped(cfg, dk, update)?
+        with_servers_stopped(cfg, dk, "account update", update)?
     };
     println!(
         "{{\"era\":{},\"updated\":true,\"changed\":{changed}}}",

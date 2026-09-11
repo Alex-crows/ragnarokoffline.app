@@ -160,6 +160,27 @@ can copy.
 Turn down **How busy** in Settings, or switch off **Fake players** entirely. The
 AI characters are the only part of the server that costs meaningful CPU, and the
 game itself runs on very little.
+
+## A character, homunculus or pet is stuck in a state with no button for it
+
+A homunculus that is nowhere to be seen but cannot be called, vaporized,
+resurrected or replaced. A character the server still thinks is online. A pet
+that will not come out. These are rows that have got into a combination the
+game has no way to reach or leave, and there is nothing in Settings for them.
+
+The server's database can be read and repaired from a terminal with the
+supervisor the app already ships:
+
+```sh
+"$HOME/Library/Application Support/Ragnarok Offline/runtime/bin/ragnarok-stack" \
+  sql "SELECT char_id, name, homun_id FROM \`char\`"
+```
+
+**[docs/DATABASE.md](DATABASE.md)** has the paths for each platform, what is in
+which table, and worked repairs — the homunculus one included. Writes go
+through `--write`, which saves a backup and stops the game first, because an
+edit made underneath a running map server is silently overwritten.
+
 ## An asset server is already using port 3338
 
 The app will not reuse or stop a server it cannot identify as its own. Quit

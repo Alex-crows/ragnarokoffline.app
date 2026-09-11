@@ -392,6 +392,11 @@ Backing up and restoring your characters, where the app keeps its data on each
 platform, how much disk it uses, and how to reset an install to a fresh state:
 **[docs/ADVANCED_FEATURES.md](docs/ADVANCED_FEATURES.md)**.
 
+The server's database can also be read and repaired directly, for the states
+the game has no button for — a homunculus that cannot be called or replaced, a
+character the server still thinks is online. `ragnarok-stack sql` is in the app
+you already have: **[docs/DATABASE.md](docs/DATABASE.md)**.
+
 ---
 
 ## License

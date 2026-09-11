@@ -1856,12 +1856,217 @@ pub fn status(dk: &Docker) {
     print!("{out}");
 }
 
-pub fn backup(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> {
+/// Run SQL against the running era's game database.
+///
+/// The app never calls this. It exists because questions like "is that
+/// homunculus still attached to my character?" have no answer anywhere in the
+/// UI, and the database is three layers down -- a container, inside a microVM,
+/// on a network that publishes no port -- so before this there was no way to
+/// look that did not involve rebuilding this path by hand.
+///
+/// Reads run against the live server. Writes do not: `--write` stops the game
+/// first, because rAthena holds characters, homunculi and pets in memory and
+/// writes them back on save, so an edit made underneath a running map server
+/// is either ignored or overwritten within the minute. That is the single
+/// most expensive thing to get wrong here, and it is invisible when it
+/// happens -- the UPDATE reports a row changed and the game changes nothing.
+pub fn sql(cfg: &Config, dk: &Docker, args: &[String]) -> Result<(), String> {
+    let mut write = false;
+    let mut from_file: Option<String> = None;
+    let mut words: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--write" => write = true,
+            "--file" => {
+                let path = args.get(i + 1).ok_or("--file needs a path")?;
+                from_file = Some(fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?);
+                i += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("unknown option {other}")),
+            other => words.push(other),
+        }
+        i += 1;
+    }
+
+    let script = match from_file {
+        Some(body) if !words.is_empty() => {
+            let _ = body;
+            return Err("Give either --file or a statement, not both".into());
+        }
+        Some(body) => body,
+        // argv, or stdin when there is nothing in argv: a heredoc is the only
+        // comfortable way to type a statement carrying quotes.
+        None if words.is_empty() => {
+            let mut body = String::new();
+            std::io::stdin()
+                .take(crate::docker::SQL_INPUT_LIMIT as u64 + 1)
+                .read_to_string(&mut body)
+                .map_err(|e| format!("reading the statement: {e}"))?;
+            body
+        }
+        None => words.join(" "),
+    };
+    if script.trim().is_empty() {
+        return Err("No statement given. Pass one as an argument, with --file, or on stdin.".into());
+    }
+
+    // Before anything is started or stopped: this is a check on what was
+    // typed, and it should answer without a server running.
+    if !write {
+        read_only(&script)?;
+    }
+
+    // Which era's database is actually mounted, not which one settings prefer:
+    // the two disagree after a failed era switch, and the wrong answer here
+    // means editing the characters of a world the player is not in.
     crate::accounts::verify_era(cfg, dk, crate::service_credentials::era(cfg))?;
-    crate::accounts::with_servers_stopped(cfg, dk, || backup_snapshot(cfg, dk, dest))
+
+    let output = if write {
+        crate::accounts::with_servers_stopped(cfg, dk, "SQL", || {
+            // The same safety copy `restore` takes, and for the same reason:
+            // whatever is about to run was typed by hand, and MyISAM -- which
+            // is what `char` and `homunculus` are -- has no transaction to
+            // roll back.
+            let safety = cfg.state.join("backups").join(format!(
+                "before-sql-{}-{}.sql",
+                crate::service_credentials::era(cfg),
+                crate::private_fs::random_hex(8)?
+            ));
+            backup_snapshot(cfg, dk, &safety.to_string_lossy(), false)?;
+            eprintln!("saved {} first", safety.display());
+            dk.console_sql(&script)
+        })?
+    } else {
+        dk.console_sql(&script)?
+    };
+
+    // Rows to stdout, everything else to stderr, so the output stays a
+    // pipeable TSV table for whoever or whatever is reading it.
+    print!("{output}");
+    if write {
+        eprintln!("applied; game services are back as they were");
+    }
+    Ok(())
 }
 
-fn backup_snapshot(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> {
+/// Statements a read may begin with.
+///
+/// `WITH` is absent on purpose: MariaDB lets a common table expression lead
+/// into UPDATE and DELETE, so it is not the read-only keyword it looks like.
+const READS: [&str; 5] = ["select", "show", "describe", "desc", "explain"];
+
+fn read_only(script: &str) -> Result<(), String> {
+    for word in leading_words(script) {
+        if !READS.contains(&word.to_ascii_lowercase().as_str()) {
+            let named = if word.is_empty() { "That".into() } else { format!("`{word}`") };
+            return Err(format!(
+                "{named} is not a read, and sql reads by default. Run it again with --write, \
+                 which saves a backup, stops the game, applies the statements and starts it again."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The first word of every statement in a script.
+///
+/// Not a SQL parser and not a sandbox: it is here so that a mistyped UPDATE is
+/// refused instead of run, which is the failure that actually happens. All it
+/// has to know is where one statement ends and the next begins, and that means
+/// recognising the `;` that does not count -- inside a string, inside an
+/// identifier, inside a comment.
+///
+/// A statement that starts with anything but a bare word yields an empty
+/// string, which no keyword matches, so the guard refuses it rather than
+/// guessing.
+fn leading_words(script: &str) -> Vec<String> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut captured = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let ch = chars[i];
+
+        if ch == '/' && chars.get(i + 1) == Some(&'*') {
+            // `/*!` is MySQL's executable comment: the body runs, so it is read
+            // as code and only the marker is skipped.
+            if chars.get(i + 2) == Some(&'!') {
+                i += 3;
+                while chars.get(i).is_some_and(char::is_ascii_digit) {
+                    i += 1;
+                }
+                continue;
+            }
+            i += 2;
+            while i < chars.len() && !(chars[i] == '*' && chars.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(chars.len());
+            continue;
+        }
+        // `--` opens a comment only when whitespace follows it; `a--b` is a
+        // subtraction.
+        if ch == '#'
+            || (ch == '-' && chars.get(i + 1) == Some(&'-')
+                && chars.get(i + 2).is_none_or(|c| c.is_whitespace()))
+        {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if ch == '\'' || ch == '"' || ch == '`' {
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\\' && ch != '`' {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == ch {
+                    // A doubled quote is a literal one, not the end.
+                    if chars.get(i + 1) == Some(&ch) {
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+            i += 1;
+            captured = true;
+            continue;
+        }
+        if ch == ';' {
+            out.push(std::mem::take(&mut word));
+            captured = false;
+            i += 1;
+            continue;
+        }
+        if !captured {
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+                word.push(ch);
+            } else if !word.is_empty() || !ch.is_whitespace() {
+                captured = true;
+            }
+        }
+        i += 1;
+    }
+    if captured || !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+pub fn backup(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> {
+    crate::accounts::verify_era(cfg, dk, crate::service_credentials::era(cfg))?;
+    crate::accounts::with_servers_stopped(cfg, dk, "backup", || backup_snapshot(cfg, dk, dest, true))
+}
+
+/// `announce` is off for the safety copies taken on someone else's behalf, so
+/// their line cannot land in the middle of output a caller is parsing.
+fn backup_snapshot(cfg: &Config, dk: &Docker, dest: &str, announce: bool) -> Result<(), String> {
     let backups = cfg.state.join("backups");
     fs::create_dir_all(&backups).map_err(|e| e.to_string())?;
     let tmp = format!("ragnarokmac-{}-{}.sql", std::process::id(), crate::private_fs::random_hex(12)?);
@@ -1893,7 +2098,9 @@ fn backup_snapshot(cfg: &Config, dk: &Docker, dest: &str) -> Result<(), String> 
     crate::private_fs::export_file(&staged, Path::new(dest))?;
     let _ = fs::remove_file(&staged);
     dk.quiet(["exec", DB_CONTAINER, "rm", "-f", &format!("/backups/{tmp}")]);
-    println!("wrote {dest} ({})", human(size));
+    if announce {
+        println!("wrote {dest} ({})", human(size));
+    }
     Ok(())
 }
 
@@ -1906,7 +2113,7 @@ pub fn restore(cfg: &Config, dk: &Docker, src: &str) -> Result<(), String> {
     let backups = cfg.state.join("backups");
     crate::private_fs::directory(&backups)?;
     let safety = backups.join(format!("before-restore-{}-{}.sql", crate::service_credentials::era(cfg), crate::private_fs::random_hex(8)?));
-    backup_snapshot(cfg, dk, &safety.to_string_lossy())?;
+    backup_snapshot(cfg, dk, &safety.to_string_lossy(), true)?;
     let tmp = format!("restore-{}-{}.sql", std::process::id(), crate::private_fs::random_hex(12)?);
     let staged = backups.join(&tmp);
     if staged.exists() { crate::private_fs::protect(&staged, false)?; }
@@ -2041,6 +2248,58 @@ mod tests {
             port_holders(err)[0].home,
             PathBuf::from("/Users/p/Ragnarok Offline (old)/nebula"),
         );
+    }
+
+    /// The guard's whole job: an edit typed where a read was meant.
+    #[test]
+    fn a_read_is_a_read_and_a_write_is_not() {
+        assert!(read_only("SELECT * FROM homunculus WHERE char_id = 150000").is_ok());
+        assert!(read_only("  show tables ").is_ok());
+        assert!(read_only("EXPLAIN DELETE FROM `char`").is_ok());
+        assert!(read_only("UPDATE `char` SET homun_id = 0").is_err());
+        assert!(read_only("DELETE FROM homunculus").is_err());
+        // WITH is deliberately not a read keyword: MariaDB accepts a CTE in
+        // front of DELETE.
+        assert!(read_only("WITH x AS (SELECT 1) SELECT * FROM x").is_err());
+    }
+
+    /// The second statement is the one that gets you, and it is the one a
+    /// single-statement check would miss.
+    #[test]
+    fn every_statement_is_checked_not_just_the_first() {
+        assert!(read_only("SELECT 1; DELETE FROM homunculus").is_err());
+        assert!(read_only("SELECT 1;\nSELECT 2;\n").is_ok());
+    }
+
+    /// A semicolon that does not end a statement, in each of the three places
+    /// one can hide.
+    #[test]
+    fn punctuation_inside_quotes_and_comments_does_not_split() {
+        assert!(read_only("SELECT 'a; DROP'").is_ok());
+        assert!(read_only("SELECT \"a; DROP\"").is_ok());
+        assert!(read_only("SELECT `odd;name` FROM t").is_ok());
+        assert!(read_only("SELECT 'it\\'s; fine'").is_ok());
+        assert!(read_only("SELECT 'two''quotes; here'").is_ok());
+        assert!(read_only("SELECT 1 -- ; DELETE FROM t\n").is_ok());
+        assert!(read_only("SELECT 1 # ; DELETE FROM t\n").is_ok());
+        assert!(read_only("/* ; DELETE FROM t */ SELECT 1").is_ok());
+        assert!(read_only("-- a note\nSELECT 1").is_ok());
+    }
+
+    /// `/*! ... */` is run by the server, so it is read as code here too.
+    #[test]
+    fn an_executable_comment_is_not_a_comment() {
+        assert!(read_only("/*!40000 DELETE FROM `char` */").is_err());
+        assert!(read_only("/*! SELECT 1 */").is_ok());
+    }
+
+    /// Anything that is not a plain keyword is refused rather than guessed at.
+    #[test]
+    fn a_statement_that_starts_with_no_keyword_is_refused() {
+        assert!(read_only("(SELECT 1)").is_err());
+        assert!(read_only("`char`").is_err());
+        assert!(leading_words("   \n -- nothing but a comment\n  ").is_empty());
+        assert!(leading_words("SELECT 1;  ").len() == 1);
     }
 
     /// Every other failure yields nothing, so the caller reports it as it
