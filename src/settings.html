@@ -1024,7 +1024,13 @@ async function refreshMods() {
         : '')
       + (m.refused
         ? `<br><span style="color:var(--bad, #e5534b)">Not loaded — ${esc(m.reason)}</span>`
-        : '');
+        : '')
+      // The server's own words about this mod's tables, from the last start.
+      // Separate from `refused`: the mod is on and the rest of it is working,
+      // so this is a warning about one layer rather than a refusal.
+      + ((!m.refused && Array.isArray(m.problems) ? m.problems : [])
+        .map(p => `<br><span style="color:var(--warn, #d98)">Server could not read part of this mod — ${esc(p)}</span>`)
+        .join(''));
     row.append(cb, text);
     box.append(row);
     // Options the mod declared for itself. Built with DOM calls and
