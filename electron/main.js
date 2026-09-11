@@ -1756,6 +1756,23 @@ const handlers = {
 
 		].join('\n'));
 
+		// What the host will and will not let the engine do: virtualisation,
+		// and whether Smart App Control will load an unsigned binary at all.
+		// Both are invisible from inside the app, both end in the same "the
+		// virtual machine did not start", and neither was ever in a bundle --
+		// so every report carried the symptom and none carried the cause. A
+		// player on Windows 10 with an AMD chip and a hypervisor switched off
+		// at boot produced a report indistinguishable from a feature that was
+		// simply never ticked, and the advice we gave was for the wrong one.
+		//
+		// The supervisor writes its own section headers here, so that one
+		// process answers both questions.
+		try {
+			lines.push(await runStack(['host-check']));
+		} catch (e) {
+			add('host', `could not read: ${e}`);
+		}
+
 		// Paths only: a client folder name is not a secret, and knowing whether
 		// the GRFs were found is most of triage.
 		const c = getClientPaths();

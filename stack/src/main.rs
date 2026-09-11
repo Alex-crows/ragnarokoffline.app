@@ -14,6 +14,7 @@ mod accounts;
 mod asset_transaction;
 mod cmds;
 mod crashes;
+mod host;
 mod config;
 mod docker;
 mod json;
@@ -32,7 +33,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process::exit;
 
-const USAGE: &str = "usage: ragnarok-stack capture-crashes|hosting-check [--lan]|secure-services [--lan] [--ram MiB]|mods|mod-enable NAME|mod-disable NAME|up [--lan] [--ram MiB]|down|repair [--lan] [--ram MiB]|status|logs [service] [tail]\n\
+const USAGE: &str = "usage: ragnarok-stack host-check|capture-crashes|hosting-check [--lan]|secure-services [--lan] [--ram MiB]|mods|mod-enable NAME|mod-disable NAME|up [--lan] [--ram MiB]|down|repair [--lan] [--ram MiB]|status|logs [service] [tail]\n\
                      \x20      backup <file>|restore <file>\n\
                      \x20      sql [--write] [--file <path>] [<statement>]\n\
                      \x20      accounts (private JSON request on stdin)\n\
@@ -111,6 +112,13 @@ fn main() {
         .and_then(|v| v.parse::<u32>().ok());
 
     let result = match verb {
+        // A pure read of the machine, for the diagnostics bundle. No lock: it
+        // changes nothing and it is most wanted exactly when a start has
+        // failed and something else holds the lock.
+        "host-check" => {
+            println!("{}", host::report(&cfg.nebula));
+            Ok(())
+        }
         "capture-crashes" => crashes::command(&cfg, &dk),
         "sharing-check" => hosting::sharing_check(&cfg, &dk).map(|report| println!("{report}")),
         "hosting-check" => hosting::check(&cfg, &dk, lan).map(|report| println!("{report}")),

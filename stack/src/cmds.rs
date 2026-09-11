@@ -2,6 +2,9 @@
 
 use crate::config::{data_root, home, lan_ip, Config, DB_CONTAINER, NET, SERVERS};
 use crate::docker::{older_than, Docker, Mount};
+// Every use of it is Windows-only; the module itself is not.
+#[cfg(windows)]
+use crate::host;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -217,7 +220,7 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
                 .map_err(|e| {
                     #[cfg(windows)]
                     if is_app_control_block(&e) {
-                        return app_control_help(&e);
+                        return host::app_control_help(&e);
                     }
                     e
                 })?;
@@ -233,8 +236,8 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
     // waiting to misread the failure. Only when our own binary is genuinely
     // unsigned: once signing lands this goes quiet on its own.
     #[cfg(windows)]
-    if sac_enforcing() && !pe_is_signed(&cfg.nebula) {
-        return Err(app_control_help(
+    if host::app_control_blocks(&cfg.nebula) {
+        return Err(host::app_control_help(
             "Smart App Control is enforcing, and this app is not signed yet",
         ));
     }
@@ -250,8 +253,8 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
     // arrives twenty seconds later as "agent did not become healthy", with the
     // real reason logged by libkrun and thrown away.
     #[cfg(windows)]
-    if whp_available() == Some(false) {
-        return Err(whp_help());
+    if host::whp_capability() == Some(false) {
+        return Err(host::blocked_help());
     }
 
     // Before starting it: an image that was damaged on the way in produces a
@@ -271,7 +274,7 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
         #[cfg(windows)]
         if let Err(e) = &repair {
             if is_app_control_block(e) {
-                return Err(app_control_help(e));
+                return Err(host::app_control_help(e));
             }
         }
         let _ = repair;
@@ -282,7 +285,7 @@ fn ensure_engine(cfg: &Config, dk: &Docker, lan: bool, ram_mib: Option<u32>) -> 
     if let Err(e) = nebula(cfg, &["up"]) {
         #[cfg(windows)]
         if is_app_control_block(&e) {
-            return Err(app_control_help(&e));
+            return Err(host::app_control_help(&e));
         }
         // Closing the game and opening it again is the ordinary way to hit
         // this, and the previous engine needs about a minute to finish
@@ -804,7 +807,7 @@ fn is_app_control_block(msg: &str) -> bool {
         || ((msg.contains("0xC0000135")
             || msg.contains("-1073741515")
             || msg.contains("os error 126"))
-            && sac_enforcing())
+            && host::app_control_state() == host::AppControl::Enforcing)
 }
 
 /// Is the Microsoft Visual C++ runtime present?
@@ -853,160 +856,6 @@ fn vc_runtime_help(reason: &str) -> String {
          Nothing is wrong with your computer or your install. The app window \
          opens without it because only the parts that run the game servers need \
          it, which is why the failure shows up a few seconds in."
-    )
-}
-
-/// Is the Windows Hypervisor Platform actually usable?
-///
-/// `Some(false)` means the feature is off; `None` means we could not tell and
-/// the caller should say nothing.
-///
-/// This asks the same question libkrun asks, in the same way, rather than
-/// inferring it. Win32_ComputerSystem.HypervisorPresent is not the same thing:
-/// it is true whenever any hypervisor is running -- Hyper-V for Credential
-/// Guard or Memory Integrity sets it -- and we told a player their
-/// virtualisation was fine on that basis while WHP was off and the guest could
-/// not boot. Get-WindowsOptionalFeature would answer correctly but needs
-/// elevation, and WinHvPlatform.dll is present either way, so its existence
-/// proves nothing (checked on Windows 10 19045 and Windows 11 26200: present
-/// with the feature both enabled and disabled).
-///
-/// Loaded dynamically. Linking WinHvPlatform.dll at load time would mean a
-/// Windows without it could not start this binary at all -- 0xC0000135, the
-/// failure we spent an evening on already.
-#[cfg(windows)]
-fn whp_available() -> Option<bool> {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn LoadLibraryA(name: *const u8) -> *mut c_void;
-        fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
-    }
-    // WHvCapabilityCodeHypervisorPresent
-    const HYPERVISOR_PRESENT: u32 = 0x0000_0000;
-    unsafe {
-        let module = LoadLibraryA(b"WinHvPlatform.dll\0".as_ptr());
-        if module.is_null() {
-            return None;
-        }
-        let proc = GetProcAddress(module, b"WHvGetCapability\0".as_ptr());
-        if proc.is_null() {
-            return None;
-        }
-        let get_capability: unsafe extern "system" fn(u32, *mut c_void, u32, *mut u32) -> i32 =
-            std::mem::transmute(proc);
-        let mut present: u32 = 0;
-        let mut written: u32 = 0;
-        let hr = get_capability(
-            HYPERVISOR_PRESENT,
-            &mut present as *mut u32 as *mut c_void,
-            4,
-            &mut written,
-        );
-        if hr != 0 || written != 4 {
-            return None;
-        }
-        Some(present != 0)
-    }
-}
-
-#[cfg(windows)]
-fn whp_help() -> String {
-    "The Windows Hypervisor Platform is switched off, and this app needs it to \
-     run its virtual machine.\n\n\
-     Turn it on:\n\n\
-     \x20   Press Windows+R, run `optionalfeatures`, tick \"Windows Hypervisor \
-     Platform\", then restart the computer.\n\n\
-     This is not your BIOS and it is not your antivirus. It is a Windows \
-     feature that is off by default, and nothing else will start the virtual \
-     machine until it is on."
-        .to_string()
-}
-
-/// Is Smart App Control enforcing right now?
-///
-/// Read rather than inferred from a failure. Under enforcement an unsigned
-/// binary is refused at load with 0xC0000135, which is indistinguishable from
-/// a genuinely missing DLL -- so the state has to be checked, not guessed from
-/// the corpse. Values: 0 off, 1 enforcement, 2 evaluation.
-#[cfg(windows)]
-fn sac_enforcing() -> bool {
-    let out = Command::new("reg")
-        .args([
-            "query",
-            r"HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy",
-            "/v",
-            "VerifiedAndReputablePolicyState",
-        ])
-        .output();
-    match out {
-        Ok(o) => {
-            let t = String::from_utf8_lossy(&o.stdout);
-            // "VerifiedAndReputablePolicyState    REG_DWORD    0x1"
-            t.split_whitespace()
-                .last()
-                .map(|v| v.eq_ignore_ascii_case("0x1"))
-                .unwrap_or(false)
-        }
-        Err(_) => false,
-    }
-}
-
-/// Does this PE carry an Authenticode signature?
-///
-/// The certificate table is data directory 4 in the optional header; a size of
-/// zero means nothing signed it. Parsed here rather than shelling out to
-/// PowerShell, because this runs on every start and a process spawn to answer
-/// "did we sign our own binary" is a poor trade.
-#[cfg(windows)]
-fn pe_is_signed(path: &Path) -> bool {
-    use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = fs::File::open(path) else { return false };
-    let mut buf = [0u8; 4];
-    // e_lfanew at 0x3C points at the PE header.
-    if f.seek(SeekFrom::Start(0x3C)).is_err() || f.read_exact(&mut buf).is_err() {
-        return false;
-    }
-    let pe = u32::from_le_bytes(buf) as u64;
-    let mut magic = [0u8; 2];
-    if f.seek(SeekFrom::Start(pe + 24)).is_err() || f.read_exact(&mut magic).is_err() {
-        return false;
-    }
-    // PE32 puts the data directories at +96, PE32+ at +112.
-    let dir_off = match u16::from_le_bytes(magic) {
-        0x10b => pe + 24 + 96,
-        0x20b => pe + 24 + 112,
-        _ => return false,
-    };
-    // Directory 4 is the certificate table: 8 bytes in, size is the second u32.
-    let mut entry = [0u8; 8];
-    if f.seek(SeekFrom::Start(dir_off + 4 * 8)).is_err() || f.read_exact(&mut entry).is_err() {
-        return false;
-    }
-    u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]) != 0
-}
-
-#[cfg(windows)]
-fn app_control_help(reason: &str) -> String {
-    format!(
-        "{reason}\n\n\
-         Windows blocked this app from running. Its files are not code-signed \
-         yet, and Smart App Control refuses programs it does not recognise.\n\n\
-         This is not a problem with your computer, and it is not a virus -- it \
-         is a signature we have not bought yet. It affects people on newer \
-         Windows 11 installs, because Smart App Control is on by default there \
-         and switches itself off on older machines.\n\n\
-         To play now, turn Smart App Control off:\n\n\
-         \x20   Windows Security -> App & browser control -> \
-         Smart App Control settings -> Off\n\n\
-         Read this part before you do: turning it off is PERMANENT. Windows \
-         will not let it be switched back on without reinstalling Windows. If \
-         you would rather not, waiting for a signed release costs you nothing \
-         but time.\n\n\
-         We are working on signing, which fixes this properly and needs no \
-         change on your side. It takes a few weeks -- the certificate authority \
-         has to verify our identity first. Progress:\n\n\
-         \x20   https://github.com/Flux159/ragnarokoffline.app/issues/8"
     )
 }
 
@@ -1111,55 +960,19 @@ fn engine_failure_help(reason: &str) -> String {
         );
     }
 
-    // Ask Windows whether a hypervisor is running at all. Cheap, and it splits
-    // the two failures that look identical: firmware virtualisation off (fixed
-    // in the BIOS) versus the Windows feature off (fixed with a checkbox).
-    let present = Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "(Get-CimInstance Win32_ComputerSystem).HypervisorPresent",
-        ])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
-    if present {
-        // Deliberately not "virtualisation is fine". HypervisorPresent only
-        // says some hypervisor is running -- Hyper-V for Credential Guard or
-        // Memory Integrity sets it too -- and it says nothing about whether
-        // the Windows Hypervisor Platform, which is what actually runs this
-        // virtual machine, is available. Claiming the machine is fine sent a
-        // player looking everywhere except the one switch that was off.
-        format!(
-            "{reason}\n\n\
-             Windows reports a hypervisor is running, so this is not your \
-             BIOS. The other thing that has to be on is the Windows \
-             Hypervisor Platform, which is separate and off by default:\n\n\
-             \x20   Press Windows+R, run `optionalfeatures`, tick \
-             \"Windows Hypervisor Platform\", then restart.\n\n\
-             If it is already ticked, Settings has a Report a problem button. \
-             The logs it collects now include the virtual machine's own \
-             startup error, which says what stopped it."
-        )
-    } else {
-        format!(
-            "{reason}\n\n\
-             The virtual machine could not start: Windows reports no hypervisor \
-             running. Two things have to be on, and they are fixed differently.\n\n\
-             1. Virtualisation in your BIOS/UEFI. Open Task Manager \
-             (Ctrl+Shift+Esc), go to Performance then CPU, and look for \
-             \"Virtualization\". If it says Disabled, turn on Intel VT-x, AMD-V \
-             or SVM Mode in your BIOS. Windows cannot enable this for you.\n\n\
-             2. The Windows Hypervisor Platform. Press Windows+R, run \
-             \"optionalfeatures\", tick \"Windows Hypervisor Platform\", and \
-             restart. Or, in a Command Prompt opened as Administrator:\n\n\
-             \x20   dism.exe /Online /Enable-Feature /FeatureName:HypervisorPlatform /All\n\n\
-             Windows 11 Home is fine for this -- it is not the Hyper-V role, \
-             which is Pro only, but the same feature WSL2 and Docker Desktop use."
-        )
-    }
+    // Ask the machine what is actually wrong rather than reading it back out
+    // of a failure that cannot be told from three others. Three unrelated
+    // faults land here identically -- virtualisation off in firmware, the
+    // Windows Hypervisor Platform feature off, and the hypervisor switched off
+    // at boot -- and the old text named only the middle one, so anyone with
+    // either of the other two was told to tick a box that was already ticked.
+    //
+    // Costs a couple of process spawns, on a path where the start has already
+    // failed and the alternative is a wrong answer.
+    #[cfg(windows)]
+    return format!("{reason}\n\n{}", host::probe().advice());
+    #[cfg(not(windows))]
+    unreachable!("every non-Windows platform returned above");
 }
 
 /// Load the bundled image tarball when the images are not already present.

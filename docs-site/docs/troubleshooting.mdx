@@ -3,9 +3,12 @@
 ## The server will not start
 
 **Virtualisation.** The app runs the server in a microVM. On Windows that needs
-virtualisation enabled in the BIOS; on Linux it needs `/dev/kvm` and your user
-in the `kvm` group. The app says which of these is missing rather than failing
-vaguely.
+three separate things: virtualisation enabled in the BIOS, the Windows
+Hypervisor Platform feature ticked, and the hypervisor not switched off at boot
+by `bcdedit`. On Linux it needs `/dev/kvm` and your user in the `kvm` group. The
+app checks each one and says which is missing rather than failing vaguely. The
+full walkthrough is in
+[TROUBLESHOOTING.md](https://github.com/Flux159/ragnarokoffline.app/blob/main/docs/TROUBLESHOOTING.md).
 
 **One copy at a time.** The ports are fixed, so a second copy of the app cannot
 start its own server even with its own data folder. Quit the first and let it
