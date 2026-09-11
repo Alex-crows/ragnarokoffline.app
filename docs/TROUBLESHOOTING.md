@@ -84,6 +84,15 @@ in this order.
 Open **Task Manager** (Ctrl+Shift+Esc) → **Performance** → **CPU**, and look for
 **Virtualization** on the right.
 
+> [!NOTE]
+> On a Windows that is not in English, that label and most of the command output
+> below is translated — Portuguese shows *Virtualização*, and `systeminfo` and
+> `dism` translate their headings too, so `findstr` for an English word finds
+> nothing and looks like a clean result. `bcdedit` is the exception: its setting
+> names are not translated. This is why the app reads these as numbers and
+> booleans rather than by matching words, and why its own answer in the
+> diagnostics bundle is worth more than any of these commands.
+
 - *Enabled* — good, go to step 2.
 - *Disabled* — turn it on in your BIOS/UEFI, under Advanced → CPU
   Configuration. On AMD it is **SVM Mode**, and most AMD motherboards ship with
@@ -92,6 +101,12 @@ Open **Task Manager** (Ctrl+Shift+Esc) → **Performance** → **CPU**, and look
   is usually Del or F2. Nothing on Windows can enable this for you.
 - *You do not see the line at all* — a hypervisor is already running, which
   means it is on. Go to step 2.
+
+**The quickest confirmation**, from a player who found it themselves: press
+Windows+R and run **`optionalfeatures`**. If the **Hyper-V** box cannot be
+ticked and hovering it says Hyper-V cannot be installed because virtualisation
+support is disabled in the firmware, that is the answer outright — it is the
+BIOS, and nothing else in this document applies until it is switched on.
 
 **2. Is kernel-level anti-cheat running?** See the section above — Riot Vanguard
 and similar drivers take the hypervisor exclusively.
