@@ -20,9 +20,22 @@ path, or make an alias for it.
 | Windows | `%APPDATA%\Ragnarok Offline\runtime\bin\ragnarok-stack.exe` |
 
 ```sh
+# macOS
 alias rostack="$HOME/Library/Application Support/Ragnarok Offline/runtime/bin/ragnarok-stack"
 
+# Linux
+alias rostack="$HOME/.local/share/Ragnarok Offline/runtime/bin/ragnarok-stack"
+
 rostack sql "SELECT char_id, name, base_level FROM \`char\`"
+```
+
+On Windows, in PowerShell. Single quotes rather than double, because PowerShell
+reads the backquote that `char` needs as its own escape character:
+
+```powershell
+Set-Alias rostack "$env:APPDATA\Ragnarok Offline\runtime\bin\ragnarok-stack.exe"
+
+rostack sql 'SELECT char_id, name, base_level FROM `char`'
 ```
 
 **The server has to be running.** The database lives inside the virtual machine

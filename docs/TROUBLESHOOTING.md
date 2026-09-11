@@ -221,8 +221,15 @@ The server's database can be read and repaired from a terminal with the
 supervisor the app already ships:
 
 ```sh
+# macOS; on Linux the app's folder is ~/.local/share/Ragnarok Offline
 "$HOME/Library/Application Support/Ragnarok Offline/runtime/bin/ragnarok-stack" \
   sql "SELECT char_id, name, homun_id FROM \`char\`"
+```
+
+```powershell
+# Windows, in PowerShell
+& "$env:APPDATA\Ragnarok Offline\runtime\bin\ragnarok-stack.exe" `
+  sql 'SELECT char_id, name, homun_id FROM `char`'
 ```
 
 **[docs/DATABASE.md](DATABASE.md)** has the paths for each platform, what is in

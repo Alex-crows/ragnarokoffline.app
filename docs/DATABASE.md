@@ -25,13 +25,39 @@ runs. It is not on your `PATH`; give the full path, or alias it.
 | Linux | `~/.local/share/Ragnarok Offline/runtime/bin/ragnarok-stack` |
 | Windows | `%APPDATA%\Ragnarok Offline\runtime\bin\ragnarok-stack.exe` |
 
+A shortcut, so the rest of this page can say `rostack`:
+
 ```sh
+# macOS
 alias rostack="$HOME/Library/Application Support/Ragnarok Offline/runtime/bin/ragnarok-stack"
+
+# Linux
+alias rostack="$HOME/.local/share/Ragnarok Offline/runtime/bin/ragnarok-stack"
+```
+
+```powershell
+# Windows, in PowerShell
+Set-Alias rostack "$env:APPDATA\Ragnarok Offline\runtime\bin\ragnarok-stack.exe"
+```
+
+```
 rostack status
 ```
 
 It needs no arguments and no environment. It finds the engine, the database and
 the app's state from its own location.
+
+**The examples below are written for a POSIX shell**, where `` \` `` escapes the
+backquotes that `char` needs. PowerShell uses the backquote as its own escape
+character, so quote those statements with single quotes instead and nothing
+needs escaping:
+
+```powershell
+rostack sql 'SELECT char_id, name, homun_id FROM `char`'
+```
+
+Heredocs are POSIX-only as well. On PowerShell, put a multi-statement script in
+a file and pass `--file`.
 
 **The server has to be running.** The database lives in a container, inside the
 microVM, on a network that publishes no port to your machine, which is why
