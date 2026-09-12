@@ -842,3 +842,9 @@ That works on any build satisfying the mod's `requires`, with no edits — and o
 a build that does not, they get a named refusal with a reason instead of a
 server that runs and is quietly wrong. Which is the whole point of filling in
 `requires`.
+
+**To have it listed in the app instead**, so anyone can find and install it
+from Settings → Mods, it goes in this repository and the pull request is the
+review: **[docs/mods/publishing.md](mods/publishing.md)**. No zip is involved
+there — the app downloads the reviewed folder file by file and checks every one
+against its digest.
