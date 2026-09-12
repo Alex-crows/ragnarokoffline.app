@@ -106,6 +106,15 @@ pub struct Manifest {
     /// the mod's `init(parameters, api)` when the client loads it -- so a mod
     /// can stay enabled and still hide part of itself.
     pub settings: Vec<Setting>,
+    /// Mods this one does not work without. Each must be installed and on, or
+    /// this mod is refused and says which one is missing.
+    pub requires_mods: Vec<String>,
+    /// Mods this one must be applied *after*, when both are on.
+    ///
+    /// Only about precedence, not need: a name here that nobody has installed
+    /// is ignored. This is how a mod says "my copy of that table wins" without
+    /// having to be named later in the alphabet than somebody else's folder.
+    pub after: Vec<String>,
 }
 
 /// One declared option. Deliberately three scalar types: anything richer is a
@@ -161,8 +170,114 @@ impl Default for Manifest {
             requires_era: None,
             default_on: true,
             settings: Vec::new(),
+            requires_mods: Vec::new(),
+            after: Vec::new(),
         }
     }
+}
+
+/// A list of mod names from the manifest, checked for shape.
+///
+/// Mod names are folder names, so the same rules apply: something a filesystem
+/// and a JSON document can both carry, and nothing that could climb out of the
+/// mods directory if it were ever joined to a path.
+fn name_list(value: &json::Value, key: &str, prefix: Option<&str>) -> Result<Vec<String>, String> {
+    let label = format!("{}{key}", prefix.unwrap_or(""));
+    let Some(list) = value.get(key) else {
+        return Ok(Vec::new());
+    };
+    let json::Value::Array(items) = list else {
+        return Err(format!("mod.json: \"{label}\" must be an array of mod names"));
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let json::Value::String(name) = item else {
+            return Err(format!("mod.json: every entry in \"{label}\" must be a mod name"));
+        };
+        if name.is_empty()
+            || name.len() > 64
+            || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(format!(
+                "mod.json: {name:?} in \"{label}\" is not a mod name -- letters, digits, - and _, up to 64"
+            ));
+        }
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+    Ok(out)
+}
+
+/// Put the enabled mods in the order their layers should be applied.
+///
+/// Alphabetical is the floor, because it is stable and a player can predict it.
+/// `after` lifts a mod above that: it is applied later than the mods it names,
+/// so its copy of a repeated key wins. Names nobody installed are ignored --
+/// `after` is about precedence between mods that are both here, and `requires`
+/// is the field for actually needing one.
+///
+/// A cycle cannot be ordered, so the mods in it are returned as an error
+/// against their names rather than silently resolved into some order that
+/// happens to fall out of the traversal.
+fn apply_order(mods: &[(String, Vec<String>)]) -> Result<Vec<String>, Vec<String>> {
+    let names: Vec<String> = {
+        let mut names: Vec<String> = mods.iter().map(|(name, _)| name.clone()).collect();
+        names.sort();
+        names
+    };
+    let mut done: Vec<String> = Vec::new();
+    // 0 untouched, 1 in progress, 2 placed.
+    let mut state: BTreeMap<&str, u8> = BTreeMap::new();
+    let edges: BTreeMap<&str, &Vec<String>> =
+        mods.iter().map(|(name, after)| (name.as_str(), after)).collect();
+
+    // Iterative, so a deep chain cannot overflow the stack, and alphabetical
+    // at every choice so the result does not depend on directory order.
+    for root in &names {
+        if state.get(root.as_str()).copied().unwrap_or(0) == 2 {
+            continue;
+        }
+        let mut stack: Vec<(&str, usize)> = vec![(root.as_str(), 0)];
+        while let Some((name, index)) = stack.pop() {
+            if index == 0 {
+                match state.get(name).copied().unwrap_or(0) {
+                    2 => continue,
+                    1 => {
+                        let cycle: Vec<String> =
+                            stack.iter().map(|(n, _)| (*n).to_string()).collect();
+                        return Err(cycle);
+                    }
+                    _ => {
+                        state.insert(name, 1);
+                    }
+                }
+            }
+            let before = edges.get(name).copied();
+            let mut next = None;
+            if let Some(before) = before {
+                let mut sorted: Vec<&String> = before.iter().collect();
+                sorted.sort();
+                if let Some(dep) = sorted.get(index) {
+                    next = Some(dep.as_str());
+                }
+            }
+            match next {
+                Some(dep) => {
+                    stack.push((name, index + 1));
+                    // Not installed, or not on: `after` is only a preference.
+                    if edges.contains_key(dep) {
+                        stack.push((dep, 0));
+                    }
+                }
+                None => {
+                    state.insert(name, 2);
+                    done.push(name.to_string());
+                }
+            }
+        }
+    }
+    Ok(done)
 }
 
 /// Read and check one mod's manifest.
@@ -200,6 +315,13 @@ fn read_manifest(dir: &Path) -> Result<Option<Manifest>, String> {
         },
         ..Manifest::default()
     };
+    m.after = name_list(&v, "after", None)?;
+    if let Some(requires) = v.get("requires") {
+        m.requires_mods = name_list(requires, "mods", Some("requires."))?;
+        if m.requires_mods.iter().any(|n| *n == m.name) {
+            return Err("mod.json: a mod cannot require itself".into());
+        }
+    }
     if let Some(list) = v.get("settings") {
         let crate::json::Value::Array(items) = list else {
             return Err("mod.json: \"settings\" must be an array of option objects".into());
@@ -679,6 +801,33 @@ pub fn scan(cfg: &Config) -> Vec<Installed> {
         }
         out.push(Installed { name, dir, status, manifest, bundled });
     }
+
+    // A second pass, because a requirement can name a mod the first pass had
+    // not reached yet. Only a mod that is actually on can satisfy one: a
+    // dependency switched off is as absent as one never installed, and the
+    // difference is worth saying out loud to whoever has to fix it.
+    let present: BTreeMap<String, bool> = out
+        .iter()
+        .map(|m| (m.name.clone(), m.status == Status::On))
+        .collect();
+    for m in &mut out {
+        if m.status != Status::On {
+            continue;
+        }
+        let missing: Vec<String> = m
+            .manifest
+            .requires_mods
+            .iter()
+            .filter(|name| present.get(name.as_str()) != Some(&true))
+            .map(|name| match present.contains_key(name.as_str()) {
+                true => format!("{name} is installed but switched off"),
+                false => format!("{name} is not installed"),
+            })
+            .collect();
+        if !missing.is_empty() {
+            m.status = Status::Refused(format!("needs {}", missing.join(", ")));
+        }
+    }
     out
 }
 
@@ -692,7 +841,7 @@ pub fn enabled(cfg: &Config) -> Vec<Installed> {
 // ---------------------------------------------------------------------------
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
-    copy_tree_owned(src, dst, "", None, &mut BTreeMap::new())
+    copy_tree_owned(src, dst, "", None, &mut BTreeMap::new(), &mut Vec::new())
 }
 
 /// Copy a tree, and optionally record which mod each file came from.
@@ -700,6 +849,78 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
 /// The recording exists for one reason: two mods that both ship
 /// `db/mob_db.yml` resolve last-wins by name order, quietly, and the player has
 /// no way to tell that half of what they installed is not in effect. The
+/// The line `label` sits on, as (start of that line, start of the next).
+///
+/// Matched at column zero and on the whole line, because `Body:` also appears
+/// indented inside rAthena's own comment blocks and as a value elsewhere.
+fn section(text: &str, label: &str) -> Option<(usize, usize)> {
+    let mut at = 0usize;
+    for line in text.split_inclusive('\n') {
+        if line.trim_end_matches(['\n', '\r']) == label {
+            return Some((at, at + line.len()));
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// The `Type:` a table declares in its header, which is what says two files
+/// are the same kind of table rather than merely the same filename.
+fn header_type(text: &str) -> Option<String> {
+    let (_, after) = section(text, "Header:")?;
+    for line in text[after..].split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // The header block is indented; the first unindented line ends it.
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("Type:") {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Combine two mods' copies of the same rAthena table.
+///
+/// Two mods that both add an item each ship `db/item_db.yml`, and merging them
+/// by filename means one of them silently does not exist. rAthena itself has
+/// no such problem -- it reads a list of files and applies them in order, so
+/// entries accumulate and only a repeated key is a contest. This produces the
+/// file it would have read: one header, both bodies, the later mod's entries
+/// last so a repeated id resolves the way the load order says.
+///
+/// `None` when the two are not the same kind of table, or either lacks a
+/// `Body:` -- then there is nothing safe to combine and the caller says so
+/// rather than guessing.
+fn merge_tables(existing: &str, incoming: &str) -> Option<String> {
+    if header_type(existing)? != header_type(incoming)? {
+        return None;
+    }
+    let (_, incoming_body) = section(incoming, "Body:")?;
+    // A Footer carries `Imports:`, which names other files rather than holding
+    // entries. Keeping the first file's and dropping the rest is right: the
+    // paths in it are the server's own, identical in every copy.
+    let incoming_end = section(incoming, "Footer:").map_or(incoming.len(), |(start, _)| start);
+    let body = incoming[incoming_body..incoming_end].trim_matches(['\n', '\r']);
+    if body.trim().is_empty() {
+        return Some(existing.to_string());
+    }
+    section(existing, "Body:")?;
+    let insert = section(existing, "Footer:").map_or(existing.len(), |(start, _)| start);
+
+    let mut out = String::with_capacity(existing.len() + body.len() + 2);
+    out.push_str(existing[..insert].trim_end_matches(['\n', '\r']));
+    out.push('\n');
+    out.push_str(body);
+    out.push('\n');
+    out.push_str(&existing[insert..]);
+    Some(out)
+}
+
 /// supervisor knows -- it is doing the overwriting -- so it says so.
 fn copy_tree_owned(
     src: &Path,
@@ -707,6 +928,7 @@ fn copy_tree_owned(
     rel: &str,
     owner: Option<&str>,
     seen: &mut BTreeMap<String, String>,
+    clashes: &mut Vec<(String, String)>,
 ) -> Result<(), String> {
     fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for e in fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
@@ -715,19 +937,46 @@ fn copy_tree_owned(
         let to = dst.join(e.file_name());
         let child = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
         if from.is_dir() {
-            copy_tree_owned(&from, &to, &child, owner, seen)?;
+            copy_tree_owned(&from, &to, &child, owner, seen, clashes)?;
         } else {
-            if let Some(owner) = owner {
-                if let Some(before) = seen.insert(child.clone(), owner.to_string()) {
-                    if before != owner {
-                        eprintln!(
-                            "mods: {owner} overwrites {child} from {before} -- \
-                             later name wins, so {before}'s copy is not in effect"
-                        );
-                    }
+            let Some(owner) = owner else {
+                let _ = fs::copy(&from, &to);
+                continue;
+            };
+            // Whoever had it before, if it was a mod rather than the stub this
+            // tree was seeded with.
+            let before = seen.insert(child.clone(), owner.to_string());
+            let Some(before) = before.filter(|before| before != owner) else {
+                let _ = fs::copy(&from, &to);
+                continue;
+            };
+
+            // Two mods, one table. rAthena would have read both files and
+            // accumulated their entries; merging by filename instead means one
+            // of them silently does not exist, which is #98.
+            let merged = match (fs::read_to_string(&to), fs::read_to_string(&from)) {
+                (Ok(existing), Ok(incoming)) => merge_tables(&existing, &incoming),
+                _ => None,
+            };
+            match merged {
+                Some(body) => {
+                    fs::write(&to, body)
+                        .map_err(|e| format!("merging {child} into {}: {e}", to.display()))?;
+                    println!("mods: {child}: {owner}'s entries added after {before}'s");
+                }
+                // Not two tables of the same kind, or not a shape with entries
+                // to combine -- a font, a cache, a mismatched Type. Last name
+                // still wins, but nobody has to find that out from a log.
+                None => {
+                    let _ = fs::copy(&from, &to);
+                    let message = format!(
+                        "db/{child} is also supplied by {owner}, and the two could not be \
+                         combined, so only {owner}'s copy is in effect."
+                    );
+                    eprintln!("mods: {before}: {message}");
+                    clashes.push((before, message));
                 }
             }
-            let _ = fs::copy(&from, &to);
         }
     }
     Ok(())
@@ -765,7 +1014,33 @@ pub fn assemble(cfg: &Config) -> Result<Assembled, String> {
             out.refused.push((m.name.clone(), reason.clone()));
         }
     }
-    let live: Vec<&Installed> = installed.iter().filter(|m| m.status == Status::On).collect();
+    let mut live: Vec<&Installed> = installed.iter().filter(|m| m.status == Status::On).collect();
+
+    // The order layers are applied in, which is what decides who wins a
+    // repeated key. Alphabetical unless a mod asked to come later.
+    let declared: Vec<(String, Vec<String>)> = live
+        .iter()
+        .map(|m| (m.name.clone(), m.manifest.after.clone()))
+        .collect();
+    match apply_order(&declared) {
+        Ok(order) => {
+            let rank: BTreeMap<&str, usize> =
+                order.iter().enumerate().map(|(i, n)| (n.as_str(), i)).collect();
+            live.sort_by_key(|m| rank.get(m.name.as_str()).copied().unwrap_or(usize::MAX));
+        }
+        Err(cycle) => {
+            // A loop cannot be ordered, so none of the mods in it are applied.
+            // Naming the ring is the only useful thing to say about it.
+            let names = cycle.join(", ");
+            for name in &cycle {
+                out.refused.push((
+                    name.clone(),
+                    format!("\"after\" forms a loop with {names}, so none of them were applied"),
+                ));
+            }
+            live.retain(|m| !cycle.contains(&m.name));
+        }
+    }
 
     // Rebuilt from scratch every start: a mod removed from state/mods must stop
     // affecting the server, and a stale merge is indistinguishable from a mod
@@ -814,12 +1089,14 @@ pub fn assemble(cfg: &Config) -> Result<Assembled, String> {
         let dst = build.join("db");
         seed_db_import(cfg, &dst)?;
         let mut owners: BTreeMap<String, String> = BTreeMap::new();
+        let mut clashes: Vec<(String, String)> = Vec::new();
         for m in &live {
             let from = m.dir.join("db");
             if from.is_dir() {
-                copy_tree_owned(&from, &dst, "", Some(&m.name), &mut owners)?;
+                copy_tree_owned(&from, &dst, "", Some(&m.name), &mut owners, &mut clashes)?;
             }
         }
+        write_clashes(&dst, &clashes);
         if !maps.is_empty() {
             write_map_layer(&dst, &maps)?;
             out.maps = maps.iter().map(|m| m.name.clone()).collect();
@@ -1121,6 +1398,29 @@ fn read_owners(db: &Path) -> BTreeMap<String, String> {
 }
 
 const OWNERS_FILE: &str = ".owners.tsv";
+const CLASHES_FILE: &str = ".clashes.tsv";
+
+/// Collisions that could not be merged, kept until the report is written.
+///
+/// Known while the tree is being built, said after the server starts, so both
+/// kinds of trouble with a mod's tables reach Settings by the same road.
+fn write_clashes(dst: &Path, clashes: &[(String, String)]) {
+    let mut body = String::new();
+    for (owner, message) in clashes {
+        body.push_str(&format!("{}\t{}\n", one_line(owner), one_line(message)));
+    }
+    let _ = fs::write(dst.join(CLASHES_FILE), body);
+}
+
+fn read_clashes(db: &Path) -> Vec<(String, String)> {
+    let Ok(body) = fs::read_to_string(db.join(CLASHES_FILE)) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(owner, message)| (owner.to_string(), message.to_string()))
+        .collect()
+}
 
 /// One table a mod supplied, and what the server made of it.
 #[derive(Debug, PartialEq)]
@@ -1307,12 +1607,16 @@ fn describe(result: &TableResult) -> String {
 pub fn record_load_report(cfg: &Config, dk: &crate::docker::Docker) {
     let build = cfg.state.join("modbuild/db");
     let owners = read_owners(&build);
-    if owners.is_empty() {
+    if owners.is_empty() && read_clashes(&build).is_empty() {
         let _ = fs::remove_file(report_path(&cfg.state));
         return;
     }
     let log = dk.logs("ragnarok-map", "4000");
     let mut problems: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Collisions the merge could not resolve, recorded when the tree was built.
+    for (owner, message) in read_clashes(&build) {
+        problems.entry(owner).or_default().push(message);
+    }
     for result in parse_table_results(&log) {
         if result.accepted >= result.offered && result.errors.is_empty() {
             continue;
@@ -1445,6 +1749,173 @@ fn write_list(state: &Path, file: &str, name: &str, present: bool, header: &str)
 
 #[cfg(test)]
 mod tests {
+
+    fn order(pairs: &[(&str, &[&str])]) -> Result<Vec<String>, Vec<String>> {
+        let owned: Vec<(String, Vec<String>)> = pairs
+            .iter()
+            .map(|(n, a)| ((*n).to_string(), a.iter().map(|s| (*s).to_string()).collect()))
+            .collect();
+        apply_order(&owned)
+    }
+
+    /// Alphabetical is the floor, so the order is predictable without anyone
+    /// declaring anything.
+    #[test]
+    fn with_nothing_declared_the_order_is_alphabetical() {
+        assert_eq!(
+            order(&[("zebra", &[]), ("alpha", &[]), ("middle", &[])]).unwrap(),
+            vec!["alpha", "middle", "zebra"]
+        );
+    }
+
+    /// The whole point: a mod whose folder sorts first can still be applied
+    /// last, so its copy of a repeated key wins.
+    #[test]
+    fn after_lifts_a_mod_past_the_alphabet() {
+        let placed = order(&[("alpha", &["zebra"]), ("zebra", &[])]).unwrap();
+        assert_eq!(placed, vec!["zebra", "alpha"]);
+    }
+
+    /// `after` is precedence, not need. Naming a mod nobody installed is how a
+    /// mod says "if that one is here, I come later", and it must not refuse
+    /// anything on its own.
+    #[test]
+    fn after_ignores_a_mod_that_is_not_here() {
+        assert_eq!(order(&[("alpha", &["absent"])]).unwrap(), vec!["alpha"]);
+    }
+
+    /// A chain, and a mod that has to be placed after two others.
+    #[test]
+    fn a_chain_and_a_join_both_come_out_in_order() {
+        let placed = order(&[("c", &["b"]), ("b", &["a"]), ("a", &[])]).unwrap();
+        assert_eq!(placed, vec!["a", "b", "c"]);
+        let placed = order(&[("last", &["one", "two"]), ("one", &[]), ("two", &[])]).unwrap();
+        assert_eq!(placed.last().unwrap(), "last");
+        assert!(placed.contains(&"one".to_string()) && placed.contains(&"two".to_string()));
+    }
+
+    /// A loop has no order. Resolving it into whatever falls out of the
+    /// traversal would be worse than saying so.
+    #[test]
+    fn a_loop_is_refused_rather_than_resolved() {
+        let cycle = order(&[("a", &["b"]), ("b", &["a"])]).unwrap_err();
+        assert!(cycle.contains(&"a".to_string()) || cycle.contains(&"b".to_string()), "{cycle:?}");
+        assert!(order(&[("a", &["a"])]).is_err(), "a mod after itself is a loop");
+    }
+
+    /// A deep chain must not be ordered by recursion.
+    #[test]
+    fn a_very_long_chain_does_not_overflow() {
+        let names: Vec<String> = (0..5000).map(|i| format!("mod-{i:05}")).collect();
+        let pairs: Vec<(String, Vec<String>)> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.clone(), if i == 0 { vec![] } else { vec![names[i - 1].clone()] }))
+            .collect();
+        assert_eq!(apply_order(&pairs).unwrap(), names);
+    }
+
+    /// Mod names become folder names and reach a path join, so the manifest
+    /// only accepts something a filesystem can carry.
+    #[test]
+    fn a_dependency_list_only_accepts_mod_names() {
+        let good = json::parse("{\"after\":[\"a-mod\",\"b_mod2\"]}").unwrap();
+        assert_eq!(name_list(&good, "after", None).unwrap(), vec!["a-mod", "b_mod2"]);
+        // Repeats collapse rather than ordering a mod against itself twice.
+        let twice = json::parse("{\"after\":[\"a\",\"a\"]}").unwrap();
+        assert_eq!(name_list(&twice, "after", None).unwrap(), vec!["a"]);
+        for bad in ["{\"after\":\"a\"}", "{\"after\":[1]}", "{\"after\":[\"../escape\"]}",
+                    "{\"after\":[\"\"]}", "{\"after\":[\"has space\"]}"] {
+            let value = json::parse(bad).unwrap();
+            assert!(name_list(&value, "after", None).is_err(), "{bad} must be refused");
+        }
+        let absent = json::parse("{}").unwrap();
+        assert!(name_list(&absent, "after", None).unwrap().is_empty());
+    }
+
+    const TABLE_A: &str = "# a comment mentioning Body: in passing\nHeader:\n  Type: ITEM_DB\n  Version: 3\n\nBody:\n  - Id: 30000\n    AegisName: Mod_A_Potion\n";
+    const TABLE_B: &str = "Header:\n  Type: ITEM_DB\n  Version: 3\n\nBody:\n  - Id: 30001\n    AegisName: Mod_B_Potion\n";
+
+    /// #98: two mods each add an item, each ships db/item_db.yml, and one of
+    /// them silently did not exist. rAthena would have read both files.
+    #[test]
+    fn two_mods_adding_items_keep_both() {
+        let merged = merge_tables(TABLE_A, TABLE_B).expect("two ITEM_DB tables merge");
+        assert!(merged.contains("Mod_A_Potion"), "{merged}");
+        assert!(merged.contains("Mod_B_Potion"), "{merged}");
+        // One header, not two: a second one partway down is not a table.
+        assert_eq!(merged.matches("Type: ITEM_DB").count(), 1, "{merged}");
+        assert_eq!(merged.matches("\nBody:").count(), 1, "{merged}");
+        // Later mod last, so a repeated id resolves the way load order says.
+        assert!(merged.find("Mod_A_Potion") < merged.find("Mod_B_Potion"), "{merged}");
+    }
+
+    /// A Footer names other files to import rather than holding entries. The
+    /// first file's is kept and entries go in front of it, or the server reads
+    /// the imports and then finds entries after them.
+    #[test]
+    fn entries_land_above_a_footer_and_it_is_not_duplicated() {
+        let with_footer = format!("{TABLE_A}\nFooter:\n  Imports:\n  - Path: db/re/item_db_etc.yml\n");
+        let b_with_footer = format!("{TABLE_B}\nFooter:\n  Imports:\n  - Path: db/re/item_db_etc.yml\n");
+        let merged = merge_tables(&with_footer, &b_with_footer).expect("merges");
+        assert_eq!(merged.matches("Footer:").count(), 1, "{merged}");
+        assert_eq!(merged.matches("item_db_etc.yml").count(), 1, "{merged}");
+        assert!(merged.find("Mod_B_Potion") < merged.find("Footer:"), "{merged}");
+        assert!(merged.trim_end().ends_with("item_db_etc.yml"), "{merged}");
+    }
+
+    /// Same filename, different kind of table. Nothing safe to combine, so the
+    /// caller is told rather than handed a file with two headers in it.
+    #[test]
+    fn two_different_kinds_of_table_do_not_merge() {
+        let other = TABLE_B.replace("ITEM_DB", "MOB_DB");
+        assert!(merge_tables(TABLE_A, &other).is_none());
+    }
+
+    /// Not every file under db/ is a table: a cache, a txt index, a stub with
+    /// a header and nothing under it.
+    #[test]
+    fn a_file_with_no_entries_to_add_is_left_alone() {
+        let stub = "Header:\n  Type: ITEM_DB\n  Version: 3\n";
+        // Nothing to take from it, so the destination is unchanged.
+        assert_eq!(merge_tables(TABLE_A, stub).as_deref(), None);
+        // Nowhere to put entries, so the caller decides instead.
+        assert!(merge_tables(stub, TABLE_B).is_none());
+        assert!(merge_tables("map_index contents", TABLE_B).is_none());
+    }
+
+    /// `Body:` appears indented inside rAthena's own comment headers, and the
+    /// word turns up in values. Only a bare line at column zero is the section.
+    #[test]
+    fn only_a_bare_body_line_starts_the_entries() {
+        let tricky = "Header:\n  Type: ITEM_DB\n#   Body:                  the entry list\nBody:\n  - Id: 1\n";
+        let (_, after) = section(tricky, "Body:").expect("the real one is found");
+        assert_eq!(&tricky[after..], "  - Id: 1\n");
+        assert_eq!(header_type(tricky).as_deref(), Some("ITEM_DB"));
+    }
+
+    /// Windows line endings are what a mod written on Windows ships.
+    #[test]
+    fn crlf_tables_merge_too() {
+        let a = TABLE_A.replace('\n', "\r\n");
+        let b = TABLE_B.replace('\n', "\r\n");
+        let merged = merge_tables(&a, &b).expect("merges");
+        assert!(merged.contains("Mod_A_Potion") && merged.contains("Mod_B_Potion"), "{merged}");
+        assert_eq!(merged.matches("Type: ITEM_DB").count(), 1, "{merged}");
+    }
+
+    /// The collision that could not be merged has to reach the report, and be
+    /// attributed to the mod whose copy is not in effect.
+    #[test]
+    fn an_unmergeable_collision_is_recorded_against_the_loser() {
+        let dir = std::env::temp_dir().join(format!("ro-clash-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let clashes = vec![("mod-a".to_string(), "db/item_db.yml is also supplied by mod-b".to_string())];
+        write_clashes(&dir, &clashes);
+        assert_eq!(read_clashes(&dir), clashes);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// The real thing, escape codes and all: rAthena prints its status lines
     /// without newlines and overwrites them in place, so several share one
