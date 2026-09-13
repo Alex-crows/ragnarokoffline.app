@@ -102,3 +102,6 @@ is released and removed from the party. It cannot be recovered afterwards.
   across a server restart.
 - Standard rAthena party rules still apply, including the overall party-member
   limit and EXP-sharing requirements.
+
+Implementation details, invariants, verification evidence, and planned work are
+documented in the [AI companion development guide](COMPANION_DEVELOPMENT.md).

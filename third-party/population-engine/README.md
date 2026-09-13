@@ -96,7 +96,9 @@ inside sentences; the `atk`, `def`, and `pass` aliases must be the entire
 message to avoid collisions with normal stat discussion. Role commands require
 the shell's exact name and answer in party chat so the assignment is visible.
 See the [AI companion guide](../../docs/COMPANIONS.md) for the player-facing
-command reference.
+command reference. Implementation invariants, verification evidence, and the
+future-work backlog are kept in the
+[AI companion development guide](../../docs/COMPANION_DEVELOPMENT.md).
 
 Companion death uses real PC semantics. The original actor stays targetable on
 the map and in the party. Priest-line shells can cast level 3 Resurrection with
