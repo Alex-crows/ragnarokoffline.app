@@ -153,5 +153,21 @@ Check the vendor checkouts are on their pins before you trust a local result:
 never builds — the CI job clones the `config/VENDOR_PINS` commit fresh every
 time, so a patch anchor that matches locally can still fail there.
 
-The build workflow triggers on `v*` tags and manual dispatch only — **there are
-no PR checks**, so local verification is all there is.
+**CI runs on every pull request** and every push to `main`: `test.yml`. It
+covers less than it sounds like, so know what it leaves out:
+
+- `server-language` — the rAthena diagnostics in `tests/diagnostics/`, run
+  against the pinned server before and after `apply-server-mods.sh`.
+- `client-build` — the patch set applied twice to the pinned roBrowser, a
+  client build, `tests/client-extensions.test.cjs` and the mod-index check.
+- `supervisor-and-lifecycle`, on Linux, macOS and Windows — `cargo test` and
+  a build of `stack/`, `node --check electron/main.js`, the pinned
+  RemoteClient and docker-slim builds, and the lifecycle tests.
+
+The rest of the shell suite (`npm test`, `tests/*.test.cjs`) is **not** in CI,
+so run it yourself after touching `electron/`. Nothing in CI starts the app or
+a VM either, so an engine or Windows-only change still needs a real machine.
+
+`build.yml`, which builds and publishes the installers, runs only on `v*` tags
+and manual dispatch. A tag push starts a public release by itself, so tag only
+a commit that is already on `origin/main`.
