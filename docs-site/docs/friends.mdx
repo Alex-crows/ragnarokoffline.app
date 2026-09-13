@@ -1,3 +1,12 @@
+import hostAndInternet from './images/multiplayer/1-host-and-internet.png';
+import safeguardsNeedAttention from './images/multiplayer/2-safeguards-need-attention.png';
+import refreshAccounts from './images/multiplayer/3-refresh-accounts.png';
+import changeGmPassword from './images/multiplayer/4-change-gm-password.png';
+import safeguardsPassed from './images/multiplayer/5-safeguards-passed.png';
+import shareWithFriends from './images/multiplayer/6-share-with-friends.png';
+import sharingIsOn from './images/multiplayer/7-sharing-is-on.png';
+import invitationPage from './images/multiplayer/8-invitation-page.png';
+
 # Playing with friends
 
 Two ways, depending on where your friends are.
@@ -17,19 +26,99 @@ The app opens a Cloudflare tunnel from your machine outward. **No ports are
 forwarded and nothing on your network is exposed** — the tunnel carries only the
 game, and only to people holding a current invitation.
 
-1. **Settings → Multiplayer**, turn on **Set up sharing over the internet**.
-   This only reveals the controls; it changes no hosting setting on its own.
-2. **Share with friends.** The first time, it secures the server's internal
-   credentials — it backs up the database first and keeps every account and
-   character. It also restarts the game services once, and unticks **Allow LAN
-   connections**: while sharing, the invitation is the only way in, so the game
-   ports stop listening on your network.
-3. Click **Your link — over the internet** to copy the whole invitation.
-
-Your friend opens it, and either logs in with a game account, creates one from
-the invitation page, or registers at the login screen with `_M`/`_F`.
+You can try this **without a Cloudflare account**. The catch is that the link
+changes every time sharing restarts; for a link that stays the same, see
+[A link that stays the same](#a-link-that-stays-the-same) below.
 
 Keep the app open and the computer awake while people are playing.
+
+### 1. Host a server, and turn on internet sharing
+
+In **Settings → Multiplayer**, set **Mode** to **Host a server**, then tick
+**Set up sharing over the internet (non-LAN)**. The checkbox only reveals the
+controls below it; it changes nothing on its own.
+
+<img src={hostAndInternet} alt="Multiplayer settings: Mode set to Host a server, and the Set up sharing over the internet (non-LAN) checkbox" />
+
+### 2. Prepare the server and check the safeguards
+
+Under **Internet sharing**, press **Prepare server for friends**, then **Check
+internet account safeguards**.
+
+Preparing secures the server's internal passwords. It backs up the database
+first, keeps every account and character, and restarts the game services once.
+
+The check will most likely say **Needs attention** for a GM/admin account. That
+is the built-in `ragnarok` account: its password is also `ragnarok`, which is
+printed in the README and all over the internet, so anyone could log in as your
+GM. Fix it in the next step — you keep the account and its GM powers.
+
+<img src={safeguardsNeedAttention} alt="Internet sharing: the safeguard check reports Needs attention for one GM/admin account with a weak or default password" />
+
+### 3. Change the GM account's password
+
+Open the **Accounts** tab and press **Refresh accounts** — the list stays empty
+until you do.
+
+<img src={refreshAccounts} alt="Accounts tab before refreshing: the Account dropdown is empty next to the Refresh accounts button" />
+
+Choose **ragnarok** in the **Account** dropdown, type a new password twice, and
+press **Change GM/admin password**. It needs **8–23** letters, numbers, spaces
+or punctuation, and cannot be the account name.
+
+This is now the password you log in with as `ragnarok`, so keep it somewhere.
+
+<img src={changeGmPassword} alt="Accounts tab with the ragnarok account selected and the message Account updated in renewal. Log in again." />
+
+Renewal and Pre-Renewal keep separate accounts. Change the password in the era
+you are going to share.
+
+### 4. Check again: all three should pass
+
+Back in **Multiplayer**, press **Check internet account safeguards** again.
+All three lines should say **Passed**.
+
+<img src={safeguardsPassed} alt="Internet sharing: all three safeguard checks passed" />
+
+### 5. Share with friends
+
+Press **Share with friends**. It takes a little while — the first time, it
+downloads Cloudflare's tunnel helper, and it restarts the game services once.
+
+<img src={shareWithFriends} alt="Play together over the internet panel with the Share with friends button" />
+
+It also unticks **Allow LAN connections**. That is on purpose: while sharing,
+the invitation is the only way in, so the game stops listening on your local
+network. Turn it back on when you are done sharing.
+
+When it is ready, the status line says **Sharing is on** and **Copy invitation
+link** becomes available.
+
+<img src={sharingIsOn} alt="Status: Sharing is on. Send an invitation link to your friends." />
+
+### 6. Send the link
+
+Either press **Copy invitation link**, or click **Your link — over the
+internet** at the top of the Multiplayer section. Both copy the whole link. It
+looks like this:
+
+```
+https://some-random-words.trycloudflare.com/#invite=Xk3v9QpL2mR7tWz1...
+```
+
+Send all of it. The part after `#invite=` is what lets your friend in, so a link
+cut off partway through will not work — and anyone you give it to can join.
+
+### 7. What your friend sees
+
+They open the link in any browser; they do not install anything. The
+invitation page lets them either **Play with my game account**, which goes to
+the normal login screen, or create an account first under **First time on this
+server? Create a game account**.
+
+<img src={invitationPage} alt="The invitation page a friend sees: Play with my game account, or create a game account" />
+
+Once they have an account, they log in and make a character like on any server.
 
 ### Temporary links change every time
 

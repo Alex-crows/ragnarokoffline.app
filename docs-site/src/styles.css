@@ -210,6 +210,17 @@ a:hover {
   line-height: 1.5;
 }
 
+/* Screenshots: app captures are retina, so cap them rather than show them at
+   twice their on-screen size. */
+.content img {
+  display: block;
+  max-width: min(100%, 640px);
+  height: auto;
+  margin: 8px 0 24px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
 /* GitHub-flavored blockquotes / notes */
 .content blockquote {
   border-left: 4px solid var(--color-primary);
