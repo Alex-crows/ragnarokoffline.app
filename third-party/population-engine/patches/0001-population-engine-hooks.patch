@@ -245,7 +245,7 @@ index e47aca9..e1ef127 100644
 +
 +{ "population_engine_max_count",&battle_config.population_engine_max_count,1000,1,30000,},
 +{ "population_engine_equipment_strict_load",&battle_config.population_engine_equipment_strict_load,0,0,1,},
-+{ "population_engine_chat_enable",&battle_config.population_engine_chat_enable,0,0,1,},
++{ "population_engine_chat_enable",&battle_config.population_engine_chat_enable,1,0,1,},
 +{ "population_engine_chat_tick_ms",&battle_config.population_engine_chat_tick_ms,1500,500,600000,},
 +{ "population_engine_chat_cooldown_ms",&battle_config.population_engine_chat_cooldown_ms,15000,1000,3600000,},
 +{ "population_engine_chat_cooldown_jitter_ms",&battle_config.population_engine_chat_cooldown_jitter_ms,5000,0,600000,},
@@ -959,6 +959,71 @@ index 2e83d77..d0df8bd 100644
  
  	std::vector<struct script_event_s>& vector = script_event[type];
  
+diff --git a/src/map/party.cpp b/src/map/party.cpp
+index 1c98dc3..dccd0ce 100644
+--- a/src/map/party.cpp
++++ b/src/map/party.cpp
+@@ -27,6 +27,7 @@
+ #include "mob.hpp"
+ #include "pc.hpp"
+ #include "pc_groups.hpp"
++#include "population_engine.hpp"
+ #include "trade.hpp"
+ 
+ static DBMap* party_db; // int32 party_id -> struct party_data* (releases data)
+@@ -451,6 +452,41 @@ bool party_invite( map_session_data& sd, map_session_data *tsd ){
+ 		return false;
+ 	}
+ 
++	// Population shells have no client socket, so the normal invitation flow
++	// below rejects them as disconnected. A shell that explicitly agreed to a
++	// party request by whisper can accept here without receiving a client packet.
++	if( population_engine_is_population_pc( tsd->id ) && tsd->pop.accept_party_request ){
++		if( tsd->pop.party_request_account != sd.status.account_id ||
++			gettick() > tsd->pop.party_request_until || !tsd->state.active || tsd->pop.arena_team != 0 ){
++			clif_party_invite_reply( sd, tsd->status.name, PARTY_REPLY_REJECTED );
++			return false;
++		}
++		if( !population_engine_can_recruit_companion( &sd ) ){
++			tsd->pop.accept_party_request = false;
++			clif_party_invite_reply( sd, tsd->status.name, PARTY_REPLY_REJECTED );
++			return false;
++		}
++		if( (tsd->status.party_id > 0 && tsd->status.party_id < 0x70000000) ||
++			tsd->party_invite > 0 || tsd->party_joining || tsd->party_creating ){
++			tsd->pop.accept_party_request = false;
++			clif_party_invite_reply( sd, tsd->status.name, PARTY_REPLY_JOIN_OTHER_PARTY );
++			return false;
++		}
++
++		tsd->pop.accept_party_request = false;
++		// The engine assigns ambient shells a synthetic per-map party ID.
++		// Clear it before the normal response path checks existing membership.
++		const int32 previous_party = tsd->status.party_id;
++		tsd->status.party_id = 0;
++		tsd->party_invite = sd.status.party_id;
++		tsd->party_invite_account = sd.status.account_id;
++		ShowInfo( "Population engine: %s accepts party invite from %s (party %d).\n",
++			tsd->status.name, sd.status.name, sd.status.party_id );
++		const bool sent = party_reply_invite( *tsd, sd.status.party_id, 1 );
++		if( !sent ) tsd->status.party_id = previous_party;
++		return sent;
++	}
++
+ 	// You can't invite someone who has already disconnected.
+ 	if( !session_isActive( tsd->fd ) ){
+ 		clif_party_invite_reply( sd, tsd->status.name, PARTY_REPLY_REJECTED );
+@@ -643,6 +674,10 @@ int32 party_member_added(int32 party_id,uint32 account_id,uint32 char_id, int32 flag)
+ 	map_session_data *sd = map_id2sd(account_id),*sd2;
+ 	struct party_data *p = party_search(party_id);
+ 	int32 i;
++	if( sd && population_engine_is_population_pc(sd->id) )
++		ShowInfo("Population engine: party join reply (party %d, shell %u, result %d, joining %d).\n",
++			party_id, char_id, flag, static_cast<int>(sd->party_joining));
++
+ 
+ 	if(sd == nullptr || sd->status.char_id != char_id || !sd->party_joining ) {
+ 		if (!flag) //Char logged off before being accepted into party.
 diff --git a/src/map/pc.cpp b/src/map/pc.cpp
 index eceefa9..8aab342 100755
 --- a/src/map/pc.cpp

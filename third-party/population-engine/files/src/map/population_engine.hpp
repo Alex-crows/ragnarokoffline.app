@@ -51,6 +51,8 @@ void population_engine_stop();
 PopulationEngineStats population_engine_get_stats();
 bool population_engine_is_running();
 bool population_engine_is_population_pc(int32_t id);
+/// True while this real player's party has fewer than four recruited companions.
+bool population_engine_can_recruit_companion(const map_session_data *owner);
 /// RAGNAROKMAC: true when a real (non-shell) player is standing on this map, or
 /// when demand-driven population is off and every map counts as live.
 bool population_engine_map_has_real_players(int16_t m);
@@ -72,6 +74,9 @@ void population_engine_combat_shell_stop(map_session_data *sd);
 void population_engine_on_whisper_to_population_pc(map_session_data *from_sd, map_session_data *bot_sd, const char *message);
 /// Map chat: any population PC on the same map whose name appears in `message` (case-insensitive) may reply overhead.
 void population_engine_on_global_chat_mention(map_session_data *from_sd, const char *message);
+/// Party chat command channel for recruited companions. Only the real party
+/// leader can change party-wide engagement modes or named shell roles.
+void population_engine_on_party_chat(map_session_data *from_sd, const char *message);
 
 /// Arena PvP: spawn `shell_count` shells on `map_name` (must be a PvP map).
 /// Shells target real (non-shell) players on the map so a player can observe AI behaviour.

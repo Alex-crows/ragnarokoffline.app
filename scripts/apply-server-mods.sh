@@ -49,7 +49,7 @@ echo "==> population engine: patches"
 # stamp is more honest than probing the tree. Re-running with a changed patch
 # set therefore needs a fresh checkout, which is what CI does anyway.
 STAMP="$TARGET/.ragnarokmac-server-mods"
-WANT=$(cat "$MOD"/patches/*.patch | shasum -a 256 | cut -d' ' -f1)
+WANT=$(cat "$MOD"/patches/*.patch | sha256sum | cut -d' ' -f1)
 
 if [ -f "$STAMP" ] && [ "$(cat "$STAMP")" = "$WANT" ]; then
     echo "    already applied"
@@ -69,4 +69,5 @@ for p in "$MOD"/patches/*.patch; do
     fi
     echo "    applied $(basename "$p")"
 done
+python3 "$ROOT/scripts/apply-party-chat-hook.py" "$TARGET/src/map/clif.cpp"
 echo "$WANT" > "$STAMP"

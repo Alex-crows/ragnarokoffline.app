@@ -181,6 +181,16 @@ TIMER_FUNC(population_engine_wander_timer)
 		if (map_id2bl(sd->id) != sd) {
 			continue;
 		}
+		// Stay put while a player has a live one-shot invitation permission.
+		// Once the 60-second window expires, normal ambient movement resumes.
+		if (sd->pop.accept_party_request && now <= sd->pop.party_request_until) {
+			continue;
+		}
+		// Real party shells are companions. Their owner-follow logic owns movement;
+		// ambient wandering would otherwise continuously pull them away.
+		if (sd->status.party_id > 0 && sd->status.party_id < 0x70000000) {
+			continue;
+		}
 		// RAGNAROKMAC: the combat tick is already proximity-driven, but this
 		// sweep was not -- it walked every shell in the world every 500 ms
 		// whether or not anyone could see them, which was the entire idle CPU

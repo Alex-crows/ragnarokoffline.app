@@ -8,6 +8,7 @@
 #include "population_engine.hpp"
 
 #include "population_engine/runtime/population_engine_combat.hpp"
+#include "population_engine/runtime/population_shell_runtime.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -20,6 +21,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <common/malloc.hpp>
@@ -617,7 +619,14 @@ void population_engine_shell_release(map_session_data* sd)
 	// torn down by another path; bail before any further access.
 	if (map_id2bl(sd->id) != sd)
 		return;
-	sd->status.party_id = 0; // clear fake population party ID before teardown
+	// Detach real memberships before freeing the shell: party data holds sd pointers.
+	if (sd->status.party_id > 0 && sd->status.party_id < 0x70000000) {
+		const int32 party_id = sd->status.party_id;
+		party_removemember2(sd, sd->status.char_id, party_id);
+		party_member_withdraw(party_id, sd->status.account_id, sd->status.char_id,
+			sd->status.name, PARTY_MEMBER_WITHDRAW_LEAVE);
+	}
+	sd->status.party_id = 0; // clear synthetic membership before teardown
 	g_pop_chat_next_tick.erase(sd->id);
 	population_engine_path_erase_for_pc(sd->id);
 	// Cancel a pending respawn timer so it doesn't fire on a freed/reused shell.
@@ -667,6 +676,9 @@ void population_engine_shell_release(map_session_data* sd)
 	aFree(sd);
 }
 
+static bool pop_is_companion(const map_session_data *sd);
+static map_session_data *pop_companion_owner(map_session_data *sd);
+
 /// Removes stale shells from g_population_engine_pcs and returns them.
 /// Caller must call population_engine_shell_release on each returned pointer.
 std::vector<map_session_data*> population_engine_collect_stale_shells()
@@ -675,7 +687,21 @@ std::vector<map_session_data*> population_engine_collect_stale_shells()
 	auto it = g_population_engine_pcs.begin();
 	while (it != g_population_engine_pcs.end()) {
 		map_session_data* sd = *it;
+		// pc_setpos briefly removes a fake PC from the map block grid. Under rapid
+		// owner map changes that state can survive until this timer, even though the
+		// shell is still active, registered, and has a valid companion owner. Do not
+		// destroy it as stale: the companion pass below repairs its placement.
+		if (sd && pop_is_companion(sd) && sd->state.active && sd->prev == nullptr
+			&& map_id2bl(sd->id) == sd && pop_companion_owner(sd) != nullptr) {
+			++it;
+			continue;
+		}
 		if (!sd || !population_engine_is_population_pc(sd->id) || !population_engine_combat_shell_ac_ok(sd)) {
+			if (sd && sd->status.party_id > 0 && sd->status.party_id < 0x70000000) {
+				ShowWarning("Population engine: companion %s became stale (active=%d, on_map=%d, registered=%d, flags=0x%x).\n",
+					sd->status.name, static_cast<int>(sd->state.active), sd->prev != nullptr,
+					map_id2bl(sd->id) == sd, sd->pop.flags);
+			}
 			stale.push_back(sd);
 			it = g_population_engine_pcs.erase(it);
 			if (g_population_engine_count.load() > 0)
@@ -932,8 +958,8 @@ static size_t autosummon_fill_map(int16_t map_id, size_t want, uint16_t job_hint
 		}
 
 		const uint8_t  hair_style  = MAX_HAIR_STYLE;
-		const uint16_t hair_color  = static_cast<uint16_t>(rnd() % 131);
-		const uint16_t cloth_color = static_cast<uint16_t>(rnd() % 699);
+		const uint16_t hair_color  = static_cast<uint16_t>(population_roll_closed_range(MIN_HAIR_COLOR, MAX_HAIR_COLOR));
+		const uint16_t cloth_color = static_cast<uint16_t>(population_roll_closed_range(MIN_CLOTH_COLOR, MAX_CLOTH_COLOR));
 
 		// Pick one item randomly from each equipment pool (empty pool = no item in that slot).
 		auto pick_pool = [](const std::vector<uint16_t>& p) -> uint16_t {
@@ -1185,6 +1211,335 @@ static bool pop_map_is_live(int16_t m) {
 	return DIFF_TICK(gettick(), it->second) < battle_config.population_engine_demand_grace_ms;
 }
 
+/// Finish the map placement normally completed by a real client's LoadEndAck.
+/// Population shells have no socket, so every pc_setpos path must call this.
+static bool pop_shell_finish_map_placement(map_session_data *sd)
+{
+	if (!sd)
+		return false;
+	sd->state.changemap = 0;
+	sd->state.connect_new = 0;
+	sd->state.warping = 0;
+	sd->state.rewarp = 0;
+	if (sd->prev == nullptr) {
+		if (map_addblock(sd) != 0)
+			return false;
+		struct map_data *mapdata = map_getmapdata(sd->m);
+		if (mapdata) {
+			if (mapdata->users++ == 0 && battle_config.dynamic_mobs)
+				map_spawnmobs(sd->m);
+			if (!pc_isinvisible(sd))
+				mapdata->users_pvp++;
+		}
+	}
+	sd->state.debug_remove_map = 0;
+	population_shell_status_checkmapchange(sd);
+	return true;
+}
+
+static void pop_shell_broadcast_map_placement(map_session_data *sd)
+{
+	if (!sd || sd->prev == nullptr)
+		return;
+	clif_spawn(sd);
+	if (sd->status.party_id > 0 && sd->status.party_id < 0x70000000) {
+		party_send_movemap(sd);
+		clif_party_hp(*sd);
+		clif_party_xy(*sd);
+	}
+}
+
+static bool pop_is_companion(const map_session_data *sd)
+{
+	return sd && sd->status.party_id > 0 && sd->status.party_id < 0x70000000
+		&& sd->pop.companion_owner_account != 0;
+}
+
+static constexpr size_t POP_COMPANION_LIMIT = 4;
+
+bool population_engine_can_recruit_companion(const map_session_data *owner)
+{
+	if (!owner || population_engine_is_population_pc(owner->id))
+		return false;
+	size_t count = 0;
+	for (const map_session_data *candidate : g_population_engine_pcs) {
+		if (pop_is_companion(candidate) &&
+			((owner->status.party_id > 0 && owner->status.party_id < 0x70000000 &&
+			  candidate->status.party_id == owner->status.party_id) ||
+			 (owner->status.party_id == 0 &&
+			  candidate->pop.companion_owner_account == owner->status.account_id)) &&
+			++count >= POP_COMPANION_LIMIT)
+			return false;
+	}
+	return true;
+}
+
+static map_session_data *pop_companion_owner(map_session_data *sd)
+{
+	if (!pop_is_companion(sd))
+		return nullptr;
+	map_session_data *owner = map_id2sd(sd->pop.companion_owner_account);
+	if (!owner || population_engine_is_population_pc(owner->id)
+		|| !owner->state.active || owner->prev == nullptr
+		|| owner->status.party_id != sd->status.party_id)
+		return nullptr;
+	return owner;
+}
+
+/// Assign each recruited shell a deterministic, unobstructed idle cell around
+/// its owner. Recomputing from stable shell IDs keeps the layout consistent
+/// without persisting party-slot bookkeeping across map changes.
+static bool pop_companion_formation_cell(map_session_data *sd, map_session_data *owner,
+	int16 &out_x, int16 &out_y)
+{
+	if (!sd || !owner || sd->m != owner->m)
+		return false;
+
+	std::vector<map_session_data *> companions;
+	for (map_session_data *candidate : g_population_engine_pcs) {
+		if (pop_is_companion(candidate) && candidate->state.active &&
+			candidate->pop.companion_owner_account == owner->status.account_id)
+			companions.push_back(candidate);
+	}
+	std::sort(companions.begin(), companions.end(), [](const map_session_data *lhs, const map_session_data *rhs) {
+		return lhs->id < rhs->id;
+	});
+
+	// The first four cells form a symmetric square around the player. The
+	// remaining cells are obstacle fallbacks and normally remain unused.
+	static constexpr int8 offsets[][2] = {
+		{-2,  1}, { 2,  1}, {-2, -1}, { 2, -1},
+		{ 0,  2}, { 0, -2}, {-2,  0}, { 2,  0}
+	};
+	static constexpr size_t offset_count = sizeof(offsets) / sizeof(offsets[0]);
+	std::vector<std::pair<int16, int16>> reserved;
+	for (size_t rank = 0; rank < companions.size(); ++rank) {
+		bool assigned = false;
+		int16 assigned_x = 0;
+		int16 assigned_y = 0;
+		for (size_t attempt = 0; attempt < offset_count; ++attempt) {
+			const size_t offset_index = (rank + attempt) % offset_count;
+			const int16 x = static_cast<int16>(owner->x + offsets[offset_index][0]);
+			const int16 y = static_cast<int16>(owner->y + offsets[offset_index][1]);
+			if (map_getcell(owner->m, x, y, CELL_CHKNOPASS))
+				continue;
+			if (std::find(reserved.begin(), reserved.end(), std::make_pair(x, y)) != reserved.end())
+				continue;
+			assigned_x = x;
+			assigned_y = y;
+			assigned = true;
+			reserved.emplace_back(x, y);
+			break;
+		}
+		if (companions[rank] == sd) {
+			if (!assigned)
+				return false;
+			out_x = assigned_x;
+			out_y = assigned_y;
+			return true;
+		}
+	}
+	return false;
+}
+
+static void pop_companion_update_formation(map_session_data *sd, map_session_data *owner)
+{
+	if (!sd || !owner || sd->m != owner->m || pc_isdead(sd))
+		return;
+	if (sd->pop.target_id != 0 || unit_is_walking(owner) || distance_bl(sd, owner) > 4 ||
+		sd->ud.skilltimer != INVALID_TIMER) {
+		sd->pop.companion_formation_active = false;
+		return;
+	}
+
+	int16 target_x = 0;
+	int16 target_y = 0;
+	if (!pop_companion_formation_cell(sd, owner, target_x, target_y)) {
+		sd->pop.companion_formation_active = false;
+		return;
+	}
+	if (sd->x == target_x && sd->y == target_y) {
+		sd->pop.companion_formation_active = false;
+		return;
+	}
+	if (sd->pop.companion_formation_active) {
+		if (sd->pop.companion_formation_x == target_x &&
+			sd->pop.companion_formation_y == target_y && unit_is_walking(sd))
+			return;
+		if (unit_is_walking(sd))
+			unit_stop_walking(sd, USW_FIXPOS);
+		sd->pop.companion_formation_active = false;
+	}
+	// A non-formation walk belongs to combat/support and has priority.
+	if (unit_is_walking(sd))
+		return;
+	if (unit_walktoxy(sd, target_x, target_y, 0) || unit_walktoxy(sd, target_x, target_y, 1)) {
+		sd->pop.companion_formation_active = true;
+		sd->pop.companion_formation_x = target_x;
+		sd->pop.companion_formation_y = target_y;
+	}
+}
+
+static uint32 pop_companion_party_threat(map_session_data *sd)
+{
+	if (!sd)
+		return 0;
+	for (const auto &entry : sd->pop.mob_tracker.tracked_mobs) {
+		const s_pe_tracked_mob &mob = entry.second;
+		if (mob.target_id == 0)
+			continue;
+		map_session_data *victim = map_id2sd(mob.target_id);
+		if (!victim || victim->status.party_id != sd->status.party_id)
+			continue;
+		if (population_shell_check_target(sd, mob.mob_id) ||
+			population_shell_check_target_for_movement(sd, mob.mob_id))
+			return mob.mob_id;
+	}
+	return 0;
+}
+
+/// A companion only joins combat chosen by its owner or forced on the party.
+/// This intentionally replaces the shell's town/field origin behavior.
+static uint32 pop_companion_combat_target(map_session_data *sd, map_session_data *owner, t_tick now)
+{
+	if (!sd || !owner)
+		return 0;
+	if (sd->pop.companion_mode == PopulationCompanionMode::Passive)
+		return 0;
+
+	// Tanks protect the party before copying the owner's target.
+	if (static_cast<PopulationRoleType>(sd->pop.role) == PopulationRoleType::Tank) {
+		const uint32 threat = pop_companion_party_threat(sd);
+		if (threat != 0)
+			return threat;
+	}
+	unit_data *owner_ud = unit_bl2ud(owner);
+	if (owner_ud) {
+		uint32 owner_target = 0;
+		// unit_data::target remains authoritative across the short gaps between
+		// basic-attack timer callbacks; gating on attacktimer alone misses most
+		// ordinary player attacks (especially visible with town-origin shells).
+		if (owner_ud->target > 0)
+			owner_target = static_cast<uint32>(owner_ud->target);
+		else if (owner_ud->skilltimer != INVALID_TIMER && owner_ud->skilltarget > 0)
+			owner_target = static_cast<uint32>(owner_ud->skilltarget);
+		if (owner_target != 0 &&
+			(population_shell_check_target(sd, owner_target) ||
+			 population_shell_check_target_for_movement(sd, owner_target)))
+			return owner_target;
+	}
+
+	// Retaliate against a recent direct attacker so a passive owner cannot leave
+	// the companion helpless. Repeated hits keep this short grace window alive.
+	if (sd->pop.last_attacker_id != 0 && sd->pop.last_attacked_tick != 0 &&
+		DIFF_TICK(now, sd->pop.last_attacked_tick) <= 5000 &&
+		(population_shell_check_target(sd, sd->pop.last_attacker_id) ||
+		 population_shell_check_target_for_movement(sd, sd->pop.last_attacker_id)))
+		return sd->pop.last_attacker_id;
+
+	// Defensive and Attack modes both protect party members already under attack.
+	const uint32 party_threat = pop_companion_party_threat(sd);
+	if (party_threat != 0)
+		return party_threat;
+
+	// Attack mode may independently acquire a monster, but only inside the
+	// owner's 12-cell command radius. Pick the closest valid target so shells
+	// do not spread out or chase ambient targets across the map.
+	if (sd->pop.companion_mode == PopulationCompanionMode::Attack) {
+		uint32 best_id = 0;
+		int best_distance = 13;
+		for (const auto &entry : sd->pop.mob_tracker.tracked_mobs) {
+			const s_pe_tracked_mob &mob = entry.second;
+			block_list *mob_bl = map_id2bl(static_cast<int>(mob.mob_id));
+			if (!mob_bl || mob_bl->m != owner->m)
+				continue;
+			const int owner_distance = distance_bl(owner, mob_bl);
+			if (owner_distance > 12 || owner_distance >= best_distance)
+				continue;
+			if (!population_shell_check_target(sd, mob.mob_id) &&
+				!population_shell_check_target_for_movement(sd, mob.mob_id))
+				continue;
+			best_id = mob.mob_id;
+			best_distance = owner_distance;
+		}
+		if (best_id != 0)
+			return best_id;
+	}
+	return 0;
+}
+
+/// Keep a real-party shell close to the player who recruited it.
+/// Returns true when normal combat/support processing may run this tick.
+static bool pop_companion_follow_owner(map_session_data *sd, map_session_data *owner, t_tick now)
+{
+	if (!sd || !owner || pc_isdead(sd))
+		return false;
+	if (pc_issit(sd) && pc_setstand(sd, false))
+		clif_standing(*sd);
+	if (sd->pop.companion_formation_active &&
+		(unit_is_walking(owner) || sd->pop.target_id != 0)) {
+		if (unit_is_walking(sd))
+			unit_stop_walking(sd, USW_FIXPOS);
+		sd->pop.companion_formation_active = false;
+	}
+
+	auto warp_near_owner = [&]() -> bool {
+		sd->pop.companion_formation_active = false;
+		int16 x = owner->x;
+		int16 y = owner->y;
+		map_search_freecell(owner, owner->m, &x, &y, 2, 2, 0);
+		population_shell_target_change(sd, 0);
+		unit_stop_attack(sd);
+		if (unit_is_walking(sd))
+			unit_stop_walking(sd, USW_FIXPOS);
+		if (pc_setpos(sd, owner->mapindex, x, y, CLR_TELEPORT) != SETPOS_OK)
+			return false;
+		if (!pop_shell_finish_map_placement(sd)) {
+			ShowError("Population engine: failed to place companion %s near %s.\n",
+				sd->status.name, owner->status.name);
+			return false;
+		}
+		sd->pop.last_teleport = now;
+		pop_shell_broadcast_map_placement(sd);
+		return true;
+	};
+
+	// Repair the precise state observed during rapid map changes: the fake PC
+	// remains active and registered but has lost its map-block membership.
+	// Bypass the normal 400 ms throttle so stale collection cannot win the race.
+	if (sd->prev == nullptr) {
+		sd->pop.companion_follow_next = now + 400;
+		if (warp_near_owner())
+			ShowInfo("Population engine: recovered off-map companion %s near %s on map %s.\n",
+				sd->status.name, owner->status.name, mapindex_id2name(owner->mapindex));
+		return false;
+	}
+
+	if (now < sd->pop.companion_follow_next)
+		return sd->m == owner->m && check_distance_bl(sd, owner, 4);
+	sd->pop.companion_follow_next = now + 400;
+
+	if (sd->m != owner->m) {
+		if (warp_near_owner())
+			ShowInfo("Population engine: companion %s followed %s to map %s.\n",
+				sd->status.name, owner->status.name, mapindex_id2name(owner->mapindex));
+		return false;
+	}
+
+	const int owner_distance = distance_bl(sd, owner);
+	if (owner_distance > AREA_SIZE + 2) {
+		warp_near_owner();
+		return false;
+	}
+	if (owner_distance > 4) {
+		population_shell_target_change(sd, 0);
+		unit_stop_attack(sd);
+		unit_walktobl(sd, owner, 3, 1);
+		return false;
+	}
+	return true;
+}
+
 TIMER_FUNC(population_engine_autosummon_timer)
 {
 	PE_PERF_SCOPE("timer.autosummon");
@@ -1197,6 +1552,8 @@ TIMER_FUNC(population_engine_autosummon_timer)
 	std::vector<DriftEntry> drift_candidates;
 	for (map_session_data *sd : g_population_engine_pcs) {
 		if (!sd || !sd->state.active || sd->prev == nullptr)
+			continue;
+		if (pop_is_companion(sd))
 			continue;
 		if (sd->pop.spawn_map_id < 0 || sd->m == sd->pop.spawn_map_id)
 			continue;
@@ -1242,6 +1599,8 @@ TIMER_FUNC(population_engine_autosummon_timer)
 		std::vector<map_session_data*> abandoned;
 		for (map_session_data *sd : g_population_engine_pcs) {
 			if (sd == nullptr || !sd->state.active || sd->prev == nullptr)
+				continue;
+			if (pop_is_companion(sd))
 				continue;
 			const bool keep = under_pressure
 				? g_pop_occupied_maps.count(sd->m) != 0
@@ -1433,6 +1792,17 @@ static int32 pop_combat_tick_bot_in_range(block_list *bl, va_list ap)
 		return 0;
 	if (!sd->state.population_combat)
 		return 0;
+	// Give the player a stationary target for the full invitation window.
+	// The whisper handler already cancels any current walk/attack; suppressing
+	// AI ticks here prevents it from immediately acquiring a new target.
+	if (sd->pop.accept_party_request) {
+		if (gettick() <= sd->pop.party_request_until)
+			return 0;
+		sd->pop.accept_party_request = false;
+		sd->pop.party_request_account = 0;
+		if (!pop_is_companion(sd))
+			sd->pop.companion_owner_account = 0;
+	}
 	// Dedupe across multiple real-PC viewers.
 	if (!ctx->ticked.insert(sd->id).second)
 		return 0;
@@ -1476,6 +1846,48 @@ TIMER_FUNC(population_engine_global_combat_timer)
 	// No round-robin / budget needed — work is bounded by real-player count.
 	s_pop_combat_tick_ctx ctx;
 	ctx.ticked.reserve(64);
+	const t_tick now = gettick();
+	for (map_session_data *sd : g_population_engine_pcs) {
+		map_session_data *owner = pop_companion_owner(sd);
+		if (!owner)
+			continue;
+		// Town-origin Wander/Support shells do not normally own a combat session.
+		// Start one only after real party membership exists so every recruited
+		// shell gets the same companion combat rules regardless of origin.
+		if (!sd->state.population_combat) {
+			const PopulationCombatStartResult started = population_engine_combat_start_session(
+				sd, PopulationCombatStartMode::AutoCombat, -1, SCSTART_NOAVOID | SCSTART_LOADED);
+			if (!started.started)
+				continue;
+		}
+		// Companion movement and AI must not depend on being inside a player's
+		// viewport; otherwise EXP/support stops and the follower can never catch up.
+		ctx.ticked.insert(sd->id);
+		if (!pop_companion_follow_owner(sd, owner, now))
+			continue;
+		// Party modes make their target decision before the normal combat tick, so
+		// refresh the tracker here as well. Its internal interval keeps this cheap.
+		population_shell_update_mob_tracker(sd);
+		const uint32 desired_target = pop_companion_combat_target(sd, owner, now);
+		if (static_cast<uint32>(sd->pop.target_id) != desired_target)
+			population_shell_target_change(sd, static_cast<int>(desired_target));
+		if (desired_target != 0 && sd->pop.companion_formation_active) {
+			if (unit_is_walking(sd))
+				unit_stop_walking(sd, USW_FIXPOS);
+			sd->pop.companion_formation_active = false;
+		}
+		if (desired_target == 0) {
+			sd->pop.sticky_target_id = 0;
+			sd->pop.sticky_until = 0;
+			unit_stop_attack(sd);
+			if (unit_is_walking(sd) && !sd->pop.companion_formation_active)
+				unit_stop_walking(sd, USW_FIXPOS);
+		}
+		if (sd->state.population_combat)
+			population_engine_combat_per_tick(sd, true);
+		if (desired_target == 0)
+			pop_companion_update_formation(sd, owner);
+	}
 	map_foreachpc(pop_combat_tick_per_real_pc, &ctx);
 	return 0;
 }
@@ -1497,9 +1909,19 @@ TIMER_FUNC(population_engine_respawn_shell_timer)
 	}
 	if (!pc_isdead(sd))
 		return 0;
+	// Companion death is terminal for this prototype. Reusing a fake PC's GID
+	// for an in-place respawn leaves duplicate clickable actors in some clients.
+	// Release from this deferred timer (rather than inside pc_dead) so the death
+	// pipeline has completed before party membership and the shell are freed.
+	if (pop_is_companion(sd)) {
+		ShowInfo("Population engine: companion %s died and is leaving the party.\n", sd->status.name);
+		population_engine_shell_release(sd);
+		return 0;
+	}
 
-	const int16_t spawn_map = sd->pop.spawn_map_id;
-	struct map_data *mapdata = (spawn_map >= 0) ? map_getmapdata(spawn_map) : nullptr;
+	map_session_data *owner = pop_companion_owner(sd);
+	const int16_t respawn_map = owner ? owner->m : sd->pop.spawn_map_id;
+	struct map_data *mapdata = (respawn_map >= 0) ? map_getmapdata(respawn_map) : nullptr;
 	if (mapdata == nullptr) {
 		ShowWarning("Population engine: respawn map invalid for shell %u (%s); despawning.\n", sd->id, sd->status.name);
 		unit_remove_map(sd, CLR_OUTSIGHT);
@@ -1509,13 +1931,25 @@ TIMER_FUNC(population_engine_respawn_shell_timer)
 	// Mob-style: tear down map presence + clear stale unit_data (target, ongoing skill timers,
 	// status changes) BEFORE re-spawning at the chosen point. Without this, shells revive
 	// with residual SCs / locked target / canact_tick from the moment of death.
-	int16 sx = sd->pop.spawn_x;
-	int16 sy = sd->pop.spawn_y;
-	if (sx <= 0 || sy <= 0 || map_getcell(spawn_map, sx, sy, CELL_CHKNOPASS))
-		map_search_freecell(nullptr, spawn_map, &sx, &sy, 4, 4, 1);
+	int16 sx = owner ? owner->x : sd->pop.spawn_x;
+	int16 sy = owner ? owner->y : sd->pop.spawn_y;
+	if (owner)
+		map_search_freecell(owner, respawn_map, &sx, &sy, 2, 2, 0);
+	else if (sx <= 0 || sy <= 0 || map_getcell(respawn_map, sx, sy, CELL_CHKNOPASS))
+		map_search_freecell(nullptr, respawn_map, &sx, &sy, 4, 4, 1);
 
-	unit_remove_map(sd, CLR_RESPAWN);
-	pc_setpos(sd, mapdata->index, sx, sy, CLR_OUTSIGHT);
+	// A shell has no client-side respawn handshake. CLR_RESPAWN can leave the
+	// already-dead actor rendered as a corpse when the same GID is spawned near
+	// the owner, so explicitly remove the old visual from every viewer first.
+	unit_remove_map(sd, CLR_OUTSIGHT);
+	if (pc_setpos(sd, mapdata->index, sx, sy, CLR_OUTSIGHT) != SETPOS_OK) {
+		ShowError("Population engine: failed to respawn shell %u (%s) on map %s.\n",
+			sd->id, sd->status.name, mapindex_id2name(mapdata->index));
+		return 0;
+	}
+	// Revive while the shell is deliberately still outside the map block grid.
+	// status_revive otherwise broadcasts resurrection/standing packets, followed
+	// by our spawn packet, which makes some clients retain clickable duplicates.
 	status_revive(sd, 100, 100);
 	status_calc_pc(sd, SCO_FORCE);
 	sd->ud.canmove_tick = 0;
@@ -1547,6 +1981,15 @@ TIMER_FUNC(population_engine_respawn_shell_timer)
 	// Restart the combat session for battle-oriented behaviors so the combat timer picks them up.
 	if (beh == PopulationBehavior::Combat || beh == PopulationBehavior::Guard)
 		population_engine_combat_start_session(sd, PopulationCombatStartMode::AutoCombat, 0, 0);
+	if (!pop_shell_finish_map_placement(sd)) {
+		ShowError("Population engine: failed to place respawned shell %u (%s) on map %s.\n",
+			sd->id, sd->status.name, mapindex_id2name(mapdata->index));
+		return 0;
+	}
+	pop_shell_broadcast_map_placement(sd);
+	if (owner)
+		ShowInfo("Population engine: companion %s respawned near %s on map %s.\n",
+			sd->status.name, owner->status.name, mapindex_id2name(mapdata->index));
 	return 0;
 }
 
@@ -1567,8 +2010,13 @@ void population_engine_on_shell_death(map_session_data *sd)
 			delete_timer(sd->pop.respawn_timer, population_engine_respawn_shell_timer);
 		sd->pop.respawn_timer = INVALID_TIMER;
 	}
-	// Schedule respawn 5 s after death, matching typical mob respawn feel.
-	sd->pop.respawn_timer = add_timer(gettick() + 5000, population_engine_respawn_shell_timer, sd->id, 0);
+	const bool companion = pop_is_companion(sd);
+	// Companion cleanup only needs to be deferred beyond pc_dead; ambient Mortal
+	// shells retain the original five-second respawn delay.
+	sd->pop.respawn_timer = add_timer(gettick() + (companion ? 100 : 5000),
+		population_engine_respawn_shell_timer, sd->id, 0);
+	if (companion)
+		ShowInfo("Population engine: companion %s died; party removal scheduled.\n", sd->status.name);
 }
 
 void population_engine_on_shell_kills_player(map_session_data *killer_sd, map_session_data *victim_sd)
@@ -1683,6 +2131,13 @@ void do_init_population_engine_load_databases() {
 		g_pop_chat_timer = add_timer_interval(gettick() + chtick, population_engine_chat_timer, 0, 0, chtick);
 		if (g_pop_chat_timer == INVALID_TIMER)
 			ShowError("Population engine: failed to register chat timer; ambient chat will be silent.\n");
+		else
+			ShowStatus("Population engine: ambient chat enabled (tick=%d ms, cooldown=%d+0..%d ms, max=%d/tick).\n",
+				chtick, battle_config.population_engine_chat_cooldown_ms,
+				battle_config.population_engine_chat_cooldown_jitter_ms,
+				battle_config.population_engine_chat_max_per_tick);
+	} else {
+		ShowStatus("Population engine: ambient chat disabled by battle configuration.\n");
 	}
 
 	population_engine_path_restart_wander_timer();
@@ -1800,15 +2255,21 @@ static map_session_data* population_engine_spawn_shell(int16_t map_id, int x, in
 	if (pop_cfg != nullptr) {
 		if (pop_cfg->hair_min >= 0) {
 			const int16_t hmax = pop_cfg->hair_max >= 0 ? pop_cfg->hair_max : pop_cfg->hair_min;
-			eff_hair = static_cast<uint8_t>(cap_value(population_roll_closed_range(pop_cfg->hair_min, hmax), MIN_HAIR_STYLE, MAX_HAIR_STYLE));
+			const int16_t valid_min = cap_value(pop_cfg->hair_min, static_cast<int16_t>(MIN_HAIR_STYLE), static_cast<int16_t>(MAX_HAIR_STYLE));
+			const int16_t valid_max = cap_value(hmax, static_cast<int16_t>(MIN_HAIR_STYLE), static_cast<int16_t>(MAX_HAIR_STYLE));
+			eff_hair = static_cast<uint8_t>(population_roll_closed_range(valid_min, valid_max));
 		}
 		if (pop_cfg->hair_color_min >= 0) {
 			const int16_t hmax = pop_cfg->hair_color_max >= 0 ? pop_cfg->hair_color_max : pop_cfg->hair_color_min;
-			eff_hair_color = static_cast<uint16_t>(cap_value(population_roll_closed_range(pop_cfg->hair_color_min, hmax), MIN_HAIR_COLOR, MAX_HAIR_COLOR));
+			const int16_t valid_min = cap_value(pop_cfg->hair_color_min, static_cast<int16_t>(MIN_HAIR_COLOR), static_cast<int16_t>(MAX_HAIR_COLOR));
+			const int16_t valid_max = cap_value(hmax, static_cast<int16_t>(MIN_HAIR_COLOR), static_cast<int16_t>(MAX_HAIR_COLOR));
+			eff_hair_color = static_cast<uint16_t>(population_roll_closed_range(valid_min, valid_max));
 		}
 		if (pop_cfg->cloth_color_min >= 0) {
 			const int16_t hmax = pop_cfg->cloth_color_max >= 0 ? pop_cfg->cloth_color_max : pop_cfg->cloth_color_min;
-			eff_cloth = static_cast<uint16_t>(cap_value(population_roll_closed_range(pop_cfg->cloth_color_min, hmax), MIN_CLOTH_COLOR, MAX_CLOTH_COLOR));
+			const int16_t valid_min = cap_value(pop_cfg->cloth_color_min, static_cast<int16_t>(MIN_CLOTH_COLOR), static_cast<int16_t>(MAX_CLOTH_COLOR));
+			const int16_t valid_max = cap_value(hmax, static_cast<int16_t>(MIN_CLOTH_COLOR), static_cast<int16_t>(MAX_CLOTH_COLOR));
+			eff_cloth = static_cast<uint16_t>(population_roll_closed_range(valid_min, valid_max));
 		}
 	}
 
@@ -2922,8 +3383,8 @@ static map_session_data* population_engine_spawn_shell(int16_t map_id, int x, in
 }
 
 // Generate bot name — used as last-resort fallback.
-// When population_engine_name_bot_fallback=0 (off) produces a deterministic syllable name from
-// a built-in 22×22×22 table (10 648 unique combos) so bots never display as "Bot_<id>".
+// When population_engine_name_bot_fallback=0 (off) produces a deterministic, pronounceable
+// name from the same root + consonant bridge + ending structure as population_names.yml.
 // When population_engine_name_bot_fallback=1 (on) falls back to the classic "Bot_<id>" format.
 static std::string generate_bot_name(uint32_t index) {
 	extern struct Battle_Config battle_config;
@@ -2932,21 +3393,24 @@ static std::string generate_bot_name(uint32_t index) {
 		snprintf(name, sizeof(name), "Bot_%u", index);
 		return std::string(name);
 	}
-	// Fallback-off: deterministic 6-char syllable name, no YAML dependency.
-	// 22 × 22 × 22 = 10 648 unique names; wraps only beyond that.
+	// Fallback-off: deterministic pronounceable name, with no YAML dependency.
 	static const char* const s_start[] = {
-		"Ka","Ve","To","Mi","Lu","Ra","Se","No","Di","Fy",
-		"Xe","Ja","Hi","Wu","Bl","Cr","Dr","Fr","Gl","Pr","St","Vy"
+		"Ala","Ari","Ava","Bela","Bri","Cae","Cora","Dae",
+		"Dari","Eli","Ena","Fae","Fiora","Gala","Hana","Ila",
+		"Iri","Jora","Kara","Kira","Lena","Lora","Mara","Mira",
+		"Nara","Neri","Ora","Rina","Sera","Tali","Vela","Yuna"
 	};
 	static const char* const s_mid[] = {
-		"ra","ni","ko","ta","li","de","fe","ga","hu","im",
-		"ja","ke","lo","mu","na","ov","pe","ri","so","tu","ul","vi"
+		"b","c","d","f","g","h","k","l","m","n","p",
+		"r","s","t","v","w","z","ch","dr","ph","sh","th"
 	};
 	static const char* const s_end[] = {
-		"ko","mi","ya","ro","ne","an","el","is","os","ur",
-		"ax","by","ce","da","en","fi","gu","he","ix","jo","ky","lo"
+		"a","ae","ai","an","ar","as","e","el","en","er","es","i",
+		"ia","iel","in","ion","ir","is","o","on","or","os","u","us"
 	};
-	static constexpr size_t N0 = 22, NM = 22, NE = 22;
+	static constexpr size_t N0 = ARRAYLENGTH(s_start);
+	static constexpr size_t NM = ARRAYLENGTH(s_mid);
+	static constexpr size_t NE = ARRAYLENGTH(s_end);
 	const size_t i0 = index % N0;
 	const size_t im = (index / N0) % NM;
 	const size_t ie = (index / (N0 * NM)) % NE;
@@ -3597,9 +4061,9 @@ bool population_engine_start(const PopulationEngineConfig& config, PopulationEng
             continue;
         }
         
-        // Use battle_config limits for hair/cloth customization (from client.conf); spawn may override from YAML
+        // Use the client-supported palette limits; spawn profiles may narrow these ranges.
         uint8_t hair_style = MAX_HAIR_STYLE; // Fixed to max (42)
-        uint16_t hair_color = rnd() % 131; // 0-600
+        uint16_t hair_color = static_cast<uint16_t>(population_roll_closed_range(MIN_HAIR_COLOR, MAX_HAIR_COLOR));
         // Try to load equipment from YAML first (exact job match)
         PopulationDbSource pop_src = PopulationDbSource::Main;
         auto equipment = population_engine_find_any(job_id, &pop_src);
@@ -3658,8 +4122,7 @@ bool population_engine_start(const PopulationEngineConfig& config, PopulationEng
         }
         
         uint32_t option = 0;
-        // cloth_color 0-698 is a fallback before equipment YAML ClothesColor overrides it.
-        uint16_t cloth_color = static_cast<uint16_t>(rnd() % 699); // 0-698 fallback
+        uint16_t cloth_color = static_cast<uint16_t>(population_roll_closed_range(MIN_CLOTH_COLOR, MAX_CLOTH_COLOR));
 
         // Collision-safe allocation from the 5 M ID pool.
         uint32_t spawn_index = population_engine_allocate_index();
@@ -3795,6 +4258,132 @@ void population_engine_combat_shell_stop(map_session_data *sd)
 	population_engine_combat_shell_teardown(sd);
 }
 
+static std::vector<std::string> population_companion_command_tokens(const char *message)
+{
+	std::vector<std::string> tokens;
+	std::string current;
+	if (!message)
+		return tokens;
+	for (const unsigned char c : std::string(message)) {
+		if (std::isalnum(c) || c == '_') {
+			current.push_back(static_cast<char>(std::tolower(c)));
+		} else if (!current.empty()) {
+			tokens.push_back(current);
+			current.clear();
+		}
+	}
+	if (!current.empty())
+		tokens.push_back(current);
+	return tokens;
+}
+
+static bool population_companion_has_token(const std::vector<std::string> &tokens, const char *wanted)
+{
+	return std::find(tokens.begin(), tokens.end(), wanted) != tokens.end();
+}
+
+static void population_companion_clear_target(map_session_data *sd)
+{
+	if (!sd)
+		return;
+	population_shell_target_change(sd, 0);
+	sd->pop.sticky_target_id = 0;
+	sd->pop.sticky_until = 0;
+	unit_stop_attack(sd);
+	if (unit_is_walking(sd))
+		unit_stop_walking(sd, USW_FIXPOS);
+}
+
+void population_engine_on_party_chat(map_session_data *from_sd, const char *message)
+{
+	if (!from_sd || !message || !message[0])
+		return;
+	if (population_engine_is_population_pc(from_sd->id) || from_sd->status.party_id == 0)
+		return;
+	// Leadership is resolved at command time. A transferred party immediately
+	// transfers command authority without rewriting companion ownership.
+	if (!party_isleader(from_sd))
+		return;
+
+	const std::vector<std::string> tokens = population_companion_command_tokens(message);
+	if (tokens.empty())
+		return;
+
+	std::set<PopulationCompanionMode> requested_modes;
+	if (population_companion_has_token(tokens, "attack"))
+		requested_modes.insert(PopulationCompanionMode::Attack);
+	if (population_companion_has_token(tokens, "defensiv"))
+		requested_modes.insert(PopulationCompanionMode::Defensive);
+	if (population_companion_has_token(tokens, "passiv"))
+		requested_modes.insert(PopulationCompanionMode::Passive);
+	// Short behavior aliases are deliberately accepted only as the complete
+	// message so ordinary discussions about ATK/DEF stats cannot issue orders.
+	if (tokens.size() == 1) {
+		if (tokens[0] == "atk")
+			requested_modes.insert(PopulationCompanionMode::Attack);
+		else if (tokens[0] == "def")
+			requested_modes.insert(PopulationCompanionMode::Defensive);
+		else if (tokens[0] == "pass")
+			requested_modes.insert(PopulationCompanionMode::Passive);
+	}
+
+	if (requested_modes.size() > 1) {
+		clif_displaymessage(from_sd->fd, "Companion command ignored: multiple combat modes found.");
+	} else if (requested_modes.size() == 1) {
+		const PopulationCompanionMode mode = *requested_modes.begin();
+		int changed = 0;
+		for (map_session_data *bot : g_population_engine_pcs) {
+			if (!pop_is_companion(bot) || bot->status.party_id != from_sd->status.party_id)
+				continue;
+			bot->pop.companion_mode = mode;
+			population_companion_clear_target(bot);
+			changed++;
+		}
+		const char *mode_name = mode == PopulationCompanionMode::Attack ? "Attack"
+			: mode == PopulationCompanionMode::Passive ? "Passive" : "Defensive";
+		char reply[CHAT_SIZE_MAX];
+		safesnprintf(reply, sizeof(reply), "Companions: %s mode enabled for %d shell%s.",
+			mode_name, changed, changed == 1 ? "" : "s");
+		clif_displaymessage(from_sd->fd, reply);
+		ShowInfo("Population engine: party leader %s set companion mode %s for party %d (%d shells).\n",
+			from_sd->status.name, mode_name, from_sd->status.party_id, changed);
+	}
+
+	std::set<PopulationRoleType> requested_roles;
+	if (population_companion_has_token(tokens, "tank") || population_companion_has_token(tokens, "tk"))
+		requested_roles.insert(PopulationRoleType::Tank);
+	if (population_companion_has_token(tokens, "support") || population_companion_has_token(tokens, "supp"))
+		requested_roles.insert(PopulationRoleType::Support);
+	if (population_companion_has_token(tokens, "attacker") || population_companion_has_token(tokens, "dd"))
+		requested_roles.insert(PopulationRoleType::Attacker);
+	if (requested_roles.size() != 1)
+		return;
+
+	const PopulationRoleType role = *requested_roles.begin();
+	for (map_session_data *bot : g_population_engine_pcs) {
+		if (!pop_is_companion(bot) || bot->status.party_id != from_sd->status.party_id)
+			continue;
+		std::string shell_name(bot->status.name);
+		std::transform(shell_name.begin(), shell_name.end(), shell_name.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		if (!population_companion_has_token(tokens, shell_name.c_str()))
+			continue;
+		bot->pop.role = static_cast<int8_t>(role);
+		population_companion_clear_target(bot);
+		const char *role_name = role == PopulationRoleType::Tank ? "Tank"
+			: role == PopulationRoleType::Support ? "Support" : "Attacker";
+		char reply[CHAT_SIZE_MAX];
+		// Send this through the real party channel as the shell. The party-chat
+		// command hook only handles packets from real clients, so this reply cannot
+		// recursively issue another command.
+		safesnprintf(reply, sizeof(reply), "%s : Understood. My role is now %s.",
+			bot->status.name, role_name);
+		party_send_message(bot, reply, strlen(reply) + 1);
+		ShowInfo("Population engine: party leader %s set companion %s role to %s.\n",
+			from_sd->status.name, bot->status.name, role_name);
+	}
+}
+
 void population_engine_on_whisper_to_population_pc(map_session_data* from_sd, map_session_data* bot_sd, const char* message)
 {
 	if (!from_sd || !bot_sd || !message)
@@ -3817,6 +4406,14 @@ void population_engine_on_whisper_to_population_pc(map_session_data* from_sd, ma
 			}
 		}
 		if (is_party_request) {
+			const bool already_recruited = pop_is_companion(bot_sd) &&
+				bot_sd->pop.companion_owner_account == from_sd->status.account_id;
+			if (!already_recruited && !population_engine_can_recruit_companion(from_sd)) {
+				static constexpr char limit_reply[] = "You already have four companions.";
+				clif_wis_message(from_sd, bot_sd->status.name, limit_reply, sizeof(limit_reply),
+					pc_get_group_level(bot_sd));
+				return;
+			}
 			// Case A: the player is already in a party and invites the shell → accept immediately.
 			if (bot_sd->party_invite > 0 && bot_sd->party_invite_account == from_sd->status.account_id) {
 				party_add_member(bot_sd->party_invite, *bot_sd);
@@ -3840,6 +4437,22 @@ void population_engine_on_whisper_to_population_pc(map_session_data* from_sd, ma
 			// Creating a real party requires char-server round-trip; instead enable accept_party_request
 			// so that when the player sends a formal invite the bot auto-accepts.
 			bot_sd->pop.accept_party_request = true;
+			bot_sd->pop.party_request_account = from_sd->status.account_id;
+			bot_sd->pop.party_request_until = gettick() + 60000;
+			bot_sd->pop.companion_owner_account = from_sd->status.account_id;
+			// Shells can otherwise wander away or reacquire a combat target while
+			// the player is trying to open the context menu and send the invite.
+			population_shell_target_change(bot_sd, 0);
+			bot_sd->pop.sticky_target_id = 0;
+			bot_sd->pop.sticky_until = 0;
+			bot_sd->pop.last_attacked_tick = 0;
+			bot_sd->pop.last_attacker_id = 0;
+			bot_sd->pop.detection_cache.cached_monsters.clear();
+			bot_sd->pop.detection_cache.last_update = 0;
+			bot_sd->pop.mob_tracker.tracked_mobs.clear();
+			bot_sd->pop.mob_tracker.last_scan = 0;
+			unit_stop_attack(bot_sd);
+			unit_stop_walking(bot_sd, USW_FIXPOS);
 			// Hint to the player via whisper.
 			const std::vector<std::string>* pool = population_chat_db().lines_for_category("party_invite_accept");
 			if (pool && !pool->empty()) {
@@ -4069,8 +4682,8 @@ int population_engine_arena_start(const char* map_name, int shell_count,
 		else sex = (rnd() % 2) ? 'M' : 'F';
 
 		const uint8_t  hair_style  = MAX_HAIR_STYLE;
-		const uint16_t hair_color  = static_cast<uint16_t>(rnd() % 131);
-		const uint16_t cloth_color = static_cast<uint16_t>(rnd() % 699);
+		const uint16_t hair_color  = static_cast<uint16_t>(population_roll_closed_range(MIN_HAIR_COLOR, MAX_HAIR_COLOR));
+		const uint16_t cloth_color = static_cast<uint16_t>(population_roll_closed_range(MIN_CLOTH_COLOR, MAX_CLOTH_COLOR));
 
 		auto pick_pool = [](const std::vector<uint16_t>& p) -> uint16_t {
 			if (p.empty()) return 0;

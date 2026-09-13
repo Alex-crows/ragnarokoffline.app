@@ -47,13 +47,17 @@ Body:
   - GlobalLists:
       Prefixes: [ "Kim", "Lee", "Rin", "Milo", "Ara", "Bex", "Cal", "Dov", "Eli", "Fae",
                   "Gal", "Hex", "Iro", "Jex", "Kas", "Lex", "Mev", "Nox", "Ora", "Pax" ]
-      # 22 start × 22 mid × 22 end = 10 648 unique syllable combinations
-      SyllablesStart: [ "Ka", "Ve", "To", "Mi", "Lu", "Ra", "Se", "No", "Di", "Fy",
-                        "Xe", "Ja", "Hi", "Wu", "Bl", "Cr", "Dr", "Fr", "Gl", "Pr", "St", "Vy" ]
-      SyllablesMid:   [ "ra", "ni", "ko", "ta", "li", "de", "fe", "ga", "hu", "im",
-                        "ja", "ke", "lo", "mu", "na", "ov", "pe", "ri", "so", "tu", "ul", "vi" ]
-      SyllablesEnd:   [ "ko", "mi", "ya", "ro", "ne", "an", "el", "is", "os", "ur",
-                        "ax", "by", "ce", "da", "en", "fi", "gu", "he", "ix", "jo", "ky", "lo" ]
+      # Pronounceable structure: vowel-ending root + consonant bridge + vowel-starting ending.
+      # 32 starts × 22 bridges × 24 endings = 16 896 configurable combinations.
+      SyllablesStart: [ "Ala", "Ari", "Ava", "Bela", "Bri", "Cae", "Cora", "Dae",
+                        "Dari", "Eli", "Ena", "Fae", "Fiora", "Gala", "Hana", "Ila",
+                        "Iri", "Jora", "Kara", "Kira", "Lena", "Lora", "Mara", "Mira",
+                        "Nara", "Neri", "Ora", "Rina", "Sera", "Tali", "Vela", "Yuna" ]
+      SyllablesMid:   [ "b", "c", "d", "f", "g", "h", "k", "l", "m", "n", "p",
+                        "r", "s", "t", "v", "w", "z", "ch", "dr", "ph", "sh", "th" ]
+      SyllablesEnd:   [ "a", "ae", "ai", "an", "ar", "as", "e", "el", "en", "er",
+                        "es", "i", "ia", "iel", "in", "ion", "ir", "is", "o", "on",
+                        "or", "os", "u", "us" ]
       # 100 adjectives × 100 nouns = 10 000 adjective_noun combinations
       Adjectives: [ "Swift", "Quiet", "Lucky", "Keen", "Brave", "Bold", "Dark", "Fair",
                     "Grim", "Wild", "Cold", "Warm", "Free", "True", "Lost", "Wise",

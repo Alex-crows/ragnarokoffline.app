@@ -176,6 +176,14 @@ struct s_population {
 
 	// --- Party invite auto-accept flag ---
 	bool   accept_party_request = false; ///< When true, bot auto-accepts the next party invite it receives.
+	uint32_t party_request_account = 0; ///< Player who requested this one-shot invitation.
+	t_tick party_request_until = 0; ///< Whisper permission expires after 60 seconds.
+	uint32_t companion_owner_account = 0; ///< Real player this shell follows after joining their party.
+	PopulationCompanionMode companion_mode = PopulationCompanionMode::Defensive; ///< Party-leader controlled engagement policy.
+	t_tick companion_follow_next = 0; ///< Rate limit for owner-follow movement decisions.
+	bool companion_formation_active = false; ///< True while walking to the shell's assigned idle formation cell.
+	int16_t companion_formation_x = 0; ///< Current formation walk destination.
+	int16_t companion_formation_y = 0; ///< Current formation walk destination.
 
 	// --- Skill fail tracking ---
 	t_tick last_skill_fail    = 0;  ///< Tick of last failed skill use.

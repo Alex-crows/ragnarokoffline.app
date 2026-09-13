@@ -259,6 +259,14 @@ struct PopAllySearchCtx {
 	map_session_data *result;          ///< Best ally found (nullptr if none)
 };
 
+static bool pop_is_party_ally(const map_session_data *shell, const map_session_data *ally)
+{
+	return shell && ally && shell != ally
+		&& shell->status.party_id > 0
+		&& shell->status.party_id < 0x70000000
+		&& shell->status.party_id == ally->status.party_id;
+}
+
 /// Scan callback: finds the living ally with the lowest HP% below hp_threshold.
 static int32 pop_ally_hp_scan_cb(block_list *bl, va_list ap)
 {
@@ -268,7 +276,7 @@ static int32 pop_ally_hp_scan_cb(block_list *bl, va_list ap)
 	if (ally->id == ctx->shell->id) return 0;
 	// Real players are skipped UNLESS they are an arena ally of this shell
 	// (team-2 shell + real player on the same arena map = mutual allies).
-	if (!ally->state.population_combat
+	if (!ally->state.population_combat && !pop_is_party_ally(ctx->shell, ally)
 	    && !population_engine_arena_is_ally(ctx->shell, ally))
 		return 0;
 	if (!ally->state.active || ally->state.warping) return 0;
@@ -293,6 +301,10 @@ static int32 pop_pack_share_target_cb(block_list *bl, va_list ap)
 	if (!ally->state.population_combat) return 0;
 	if (!ally->state.active || ally->state.warping) return 0;
 	if (status_isdead(*ally)) return 0;
+	// Hired companions take targets from their owner/party-threat controller,
+	// never from the ambient field-shell pack AI.
+	if (ally->status.party_id > 0 && ally->status.party_id < 0x70000000 &&
+		ally->pop.companion_owner_account != 0) return 0;
 	// Only share with idle shells (no current target).
 	if (ally->pop.target_id != 0) return 0;
 	// Only share with combat-capable shells.
@@ -352,7 +364,7 @@ static int32 pop_ally_status_scan_cb(block_list *bl, va_list ap)
 	if (!ally) return 0;
 	PopAllySearchCtx *ctx = va_arg(ap, PopAllySearchCtx*);
 	if (ally->id == ctx->shell->id) return 0;
-	if (!ally->state.population_combat
+	if (!ally->state.population_combat && !pop_is_party_ally(ctx->shell, ally)
 	    && !population_engine_arena_is_ally(ctx->shell, ally))
 		return 0;
 	if (!ally->state.active || ally->state.warping) return 0;
@@ -374,7 +386,7 @@ static int32 pop_ally_any_scan_cb(block_list *bl, va_list ap)
 	if (!ally) return 0;
 	PopAllySearchCtx *ctx = va_arg(ap, PopAllySearchCtx*);
 	if (ally->id == ctx->shell->id) return 0;
-	if (!ally->state.population_combat
+	if (!ally->state.population_combat && !pop_is_party_ally(ctx->shell, ally)
 	    && !population_engine_arena_is_ally(ctx->shell, ally))
 		return 0;
 	if (!ally->state.active || ally->state.warping) return 0;
@@ -383,7 +395,7 @@ static int32 pop_ally_any_scan_cb(block_list *bl, va_list ap)
 	return 1; // take the first one
 }
 
-/// Context for Tank-role intercept: find a mob that is targeting a nearby population-shell ally.
+/// Context for Tank-role intercept: find a mob targeting a nearby real-party ally.
 struct PopTankInterceptCtx {
 	map_session_data *tank;        ///< The intercepting tank shell
 	int32              result_id;  ///< BL id of the mob to intercept (0 if none found)
@@ -396,12 +408,12 @@ static int32 pop_tank_intercept_cb(block_list *bl, va_list ap)
 	if (!md || md->status.hp <= 0) return 0;
 	if (md->target_id == 0) return 0;
 	PopTankInterceptCtx *ctx = va_arg(ap, PopTankInterceptCtx*);
-	// Only intercept mobs targeting population shell allies (not targeting the tank itself).
+	// Intercept threats to any real party member, including the human player.
 	if (md->target_id == ctx->tank->id) return 0;
 	block_list *tgt = map_id2bl(md->target_id);
 	map_session_data *tgt_sd = BL_CAST(BL_PC, tgt);
 	if (!tgt_sd) return 0;
-	if (!tgt_sd->state.population_combat) return 0; // only protect shell allies, not real players
+	if (!pop_is_party_ally(ctx->tank, tgt_sd)) return 0;
 	if (!tgt_sd->state.active || status_isdead(*tgt_sd)) return 0;
 	ctx->result_id = md->id;
 	return 1; // stop scan on first match
@@ -1322,9 +1334,12 @@ static void population_shell_combat_process_tick(map_session_data *sd, t_tick cu
 		}
 	}
 
+	const bool hired_companion = sd->status.party_id > 0 && sd->status.party_id < 0x70000000
+		&& sd->pop.companion_owner_account != 0;
+
 	// --- PAI::TargetSwitch ---
 	// If a closer enemy exists than the current target, switch to it.
-	if ((pai & PAI::TargetSwitch) && pe.target_id != 0 && !sd->pop.mob_tracker.tracked_mobs.empty()) {
+	if (!hired_companion && (pai & PAI::TargetSwitch) && pe.target_id != 0 && !sd->pop.mob_tracker.tracked_mobs.empty()) {
 		int cur_dist = 999;
 		block_list *cur_bl = map_id2bl(static_cast<int>(pe.target_id));
 		if (cur_bl) cur_dist = distance_bl(sd, cur_bl);
@@ -1371,9 +1386,11 @@ static void population_shell_combat_process_tick(map_session_data *sd, t_tick cu
 	// Re-snapshot after Tank intercept may have set a new target.
 	const uint32 tid = static_cast<uint32>(pe.target_id);
 
-	// Role: Support — if any nearby ally is below 50% HP, halt and let heal/buff CDs fire.
+	// Role: Support — if any nearby ally is below 50% HP, close healing distance
+	// before considering the enemy target. Once in range, continue into the
+	// ally-skill pass below instead of returning forever without casting.
 	// If the ally is more than 3 cells away, walk toward them first.
-	if (shell_role == PopulationRoleType::Support && tid == 0) {
+	if (shell_role == PopulationRoleType::Support) {
 		PopAllySearchCtx hctx{};
 		hctx.shell        = sd;
 		hctx.hp_threshold = 50;
@@ -1382,10 +1399,12 @@ static void population_shell_combat_process_tick(map_session_data *sd, t_tick cu
 		map_foreachinrange(pop_ally_hp_scan_cb, sd, 12, BL_PC, &hctx);
 		if (hctx.result != nullptr) {
 			const int dist = distance_bl(sd, hctx.result);
-			if (dist > 3 && !unit_is_walking(sd) &&
-			    population_shell_can_emit_movement(sd, MovementOwner::Roam, "support:follow_ally"))
-				unit_walktobl(sd, hctx.result, 3, 1);
-			return; // Stay focused on injured ally — ally-attack skill fires on next tick.
+			if (dist > 3) {
+				if (!unit_is_walking(sd) &&
+				    population_shell_can_emit_movement(sd, MovementOwner::Roam, "support:follow_ally"))
+					unit_walktobl(sd, hctx.result, 3, 1);
+				return;
+			}
 		}
 	}
 
@@ -1399,7 +1418,8 @@ static void population_shell_combat_process_tick(map_session_data *sd, t_tick cu
 	}
 
 	// Ally-targeted attack skills (reactive heals, ally buffs with conditions).
-	if (!flag_attack_only && do_skills && current_tick >= pe.skill_cd && battle_config.population_engine_shell_attackskill) {
+	if (shell_role != PopulationRoleType::Attacker && !flag_attack_only && do_skills &&
+		current_tick >= pe.skill_cd && battle_config.population_engine_shell_attackskill) {
 		if (population_shell_cast_ally_attack_skill(sd, current_tick)) {
 			// skill_cd already set inside cast_ally_attack_skill based on actual timing.
 			return;
@@ -1407,6 +1427,11 @@ static void population_shell_combat_process_tick(map_session_data *sd, t_tick cu
 	}
 
 	population_shell_autoshadowspell_autoselect(sd);
+
+	// Owner-follow controls movement for hired companions. With no party-approved
+	// target they remain calm here while support/heal logic above still runs.
+	if (hired_companion && tid == 0)
+		return;
 
 	// Async A* path follower removed — movement is now driven directly by
 	// unit_walktoxy / unit_walktobl which use rAthena's built-in BFS path search.
@@ -1918,15 +1943,19 @@ int population_engine_combat_per_tick(map_session_data *sd, bool do_skills)
 	if (pc_isdead(sd))
 		return 0;
 	s_population &pe = sd->pop;
+	const bool hired_companion = sd->status.party_id > 0 && sd->status.party_id < 0x70000000
+		&& sd->pop.companion_owner_account != 0;
 	population_shell_update_mob_tracker(sd);
 	t_tick current_tick = gettick();
 
 	// Daily cycle: adjust behavior for town shells based on server hour.
-	population_shell_apply_daily_cycle(sd);
+	if (!hired_companion)
+		population_shell_apply_daily_cycle(sd);
 
-	// Sit/Vendor behaviors skip combat entirely — just maintain buffs.
+	// Unrecruited Sit/Vendor shells skip combat entirely. Party recruitment
+	// supersedes their origin behavior just like it does for Wander/Support.
 	const auto cur_beh = static_cast<PopulationBehavior>(sd->pop.behavior);
-	if (cur_beh == PopulationBehavior::Sit || cur_beh == PopulationBehavior::Vendor) {
+	if (!hired_companion && (cur_beh == PopulationBehavior::Sit || cur_beh == PopulationBehavior::Vendor)) {
 		population_shell_status_checkmapchange(sd);
 		return 0;
 	}
@@ -2024,7 +2053,9 @@ int population_engine_combat_per_tick(map_session_data *sd, bool do_skills)
 	}
 
 	// Do not drop a chase target just because it is outside client sight yet — that prevented pathing.
-	if (!pe.target_id) {
+	// Hired companions receive targets from their owner/party-threat controller
+	// and must never fall back to the shell's ambient town/field target scan.
+	if (!pe.target_id && !hired_companion) {
 		unsigned int found_target = population_shell_check_target_alive(sd);
 		if (found_target > 0) {
 			population_shell_target_change(sd, found_target);
@@ -2036,13 +2067,17 @@ int population_engine_combat_per_tick(map_session_data *sd, bool do_skills)
 			}
 		} else
 			population_shell_target_change(sd, 0);
-	} else if (!population_shell_check_target(sd, pe.target_id)) {
+	} else if (pe.target_id && !population_shell_check_target(sd, pe.target_id)) {
 		if (!population_shell_check_target_for_movement(sd, pe.target_id)) {
-			unsigned int found_target = population_shell_check_target_alive(sd);
-			if (found_target > 0)
-				population_shell_target_change(sd, found_target);
-			else
+			if (hired_companion) {
 				population_shell_target_change(sd, 0);
+			} else {
+				unsigned int found_target = population_shell_check_target_alive(sd);
+				if (found_target > 0)
+					population_shell_target_change(sd, found_target);
+				else
+					population_shell_target_change(sd, 0);
+			}
 		}
 	}
 
