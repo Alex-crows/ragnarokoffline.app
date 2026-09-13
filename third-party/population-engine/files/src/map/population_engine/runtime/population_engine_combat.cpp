@@ -267,6 +267,79 @@ static bool pop_is_party_ally(const map_session_data *shell, const map_session_d
 		&& shell->status.party_id == ally->status.party_id;
 }
 
+struct PopDeadAllySearchCtx {
+	map_session_data *shell;
+	map_session_data *result;
+	int best_distance;
+};
+
+/// Resurrection targets only real-party members.  Dead ambient shells that
+/// happen to share a synthetic party id are deliberately excluded.
+static int32 pop_dead_party_ally_scan_cb(block_list *bl, va_list ap)
+{
+	map_session_data *ally = BL_CAST(BL_PC, bl);
+	if (!ally)
+		return 0;
+	PopDeadAllySearchCtx *ctx = va_arg(ap, PopDeadAllySearchCtx *);
+	if (!pop_is_party_ally(ctx->shell, ally) || !ally->state.active ||
+		ally->state.warping || !status_isdead(*ally))
+		return 0;
+	const int ally_distance = distance_bl(ctx->shell, ally);
+	if (ally_distance < ctx->best_distance) {
+		ctx->best_distance = ally_distance;
+		ctx->result = ally;
+	}
+	return 0;
+}
+
+static bool pop_is_resurrection_job(uint16 job_id)
+{
+	switch (job_id) {
+	case JOB_PRIEST:
+	case JOB_HIGH_PRIEST:
+	case JOB_ARCH_BISHOP:
+	case JOB_ARCH_BISHOP_T:
+	case JOB_CARDINAL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/// Priest-line companions always know level-4 Resurrection.  Population PCs
+/// already bypass skill item requirements in skill_get_requirement(), so the
+/// Blue Gemstone catalyst is intentionally unlimited and never enters their
+/// inaccessible inventory.
+static bool population_shell_try_party_resurrection(map_session_data *sd, t_tick current_tick)
+{
+	constexpr uint16 resurrection_level = 4;
+	if (!sd || !pop_is_resurrection_job(sd->status.class_) ||
+		sd->status.party_id <= 0 || sd->status.party_id >= 0x70000000 ||
+		current_tick < sd->pop.skill_cd || skill_isNotOk(ALL_RESURRECTION, *sd))
+		return false;
+
+	const int16 range = static_cast<int16>(
+		std::max(1, skill_get_range2(sd, ALL_RESURRECTION, resurrection_level, true)));
+	PopDeadAllySearchCtx ctx{ sd, nullptr, range + 1 };
+	map_foreachinrange(pop_dead_party_ally_scan_cb, sd, range, BL_PC, &ctx);
+	if (!ctx.result)
+		return false;
+
+	const int sp_cost = skill_get_sp(ALL_RESURRECTION, resurrection_level);
+	if (sp_cost > sd->battle_status.sp)
+		return false;
+	if (!unit_skilluse_id(sd, ctx.result->id, ALL_RESURRECTION, resurrection_level))
+		return false;
+
+	const t_tick cast_time = skill_get_cast(ALL_RESURRECTION, resurrection_level);
+	const t_tick delay = skill_get_delay(ALL_RESURRECTION, resurrection_level);
+	sd->pop.skill_cd = current_tick + cast_time + std::max<t_tick>(delay,
+		static_cast<t_tick>(std::max(1, battle_config.population_engine_shell_attack_skill_delay_ms)));
+	ShowInfo("Population engine: companion %s casts Resurrection level 4 on %s.\n",
+		sd->status.name, ctx.result->status.name);
+	return true;
+}
+
 /// Scan callback: finds the living ally with the lowest HP% below hp_threshold.
 static int32 pop_ally_hp_scan_cb(block_list *bl, va_list ap)
 {
@@ -1204,6 +1277,13 @@ static void population_shell_combat_process_tick(map_session_data *sd, t_tick cu
 	const bool flag_skill_only  = (sd->pop.flags & PSF::SkillOnly)  != 0;
 	const PopulationRoleType shell_role = static_cast<PopulationRoleType>(sd->pop.role);
 	const int32 pai = battle_config.population_engine_ai;
+
+	// Party resurrection outranks ordinary role behaviour.  This intentionally
+	// also applies to a priest assigned Tank, Attacker, or None: class capability
+	// determines whether the party can recover from a death.
+	if (!flag_attack_only && do_skills &&
+		population_shell_try_party_resurrection(sd, current_tick))
+		return;
 
 	// --- PANIC INTERRUPT: emergency hide dodge ---
 	// If a nearby unit is RIGHT NOW casting on this shell (direct target or ground AoE

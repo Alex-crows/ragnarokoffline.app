@@ -687,6 +687,29 @@ std::vector<map_session_data*> population_engine_collect_stale_shells()
 	auto it = g_population_engine_pcs.begin();
 	while (it != g_population_engine_pcs.end()) {
 		map_session_data* sd = *it;
+		// A dead recruited shell remains a real party member and a targetable
+		// corpse while its owner stays on this map.  Keeping the same BL_PC in the
+		// map grid lets normal Resurrection/Yggdrasil Leaf revive it in place and
+		// avoids the duplicate actors caused by remove/re-add respawns.  Once the
+		// owner leaves the map (or is no longer available), normal stale cleanup
+		// below releases the corpse and withdraws it from the party.
+		if (sd && pop_is_companion(sd) && pc_isdead(sd)) {
+			map_session_data *owner = pop_companion_owner(sd);
+			if (owner && sd->state.active && sd->prev != nullptr &&
+				map_id2bl(sd->id) == sd && sd->m == owner->m) {
+				++it;
+				continue;
+			}
+			ShowInfo("Population engine: dead companion %s left behind by its owner; releasing it.\n",
+				sd->status.name);
+			stale.push_back(sd);
+			it = g_population_engine_pcs.erase(it);
+			if (g_population_engine_count.load() > 0)
+				g_population_engine_count--;
+			if (g_population_engine_stats.active_units > 0)
+				g_population_engine_stats.active_units--;
+			continue;
+		}
 		// pc_setpos briefly removes a fake PC from the map block grid. Under rapid
 		// owner map changes that state can survive until this timer, even though the
 		// shell is still active, registered, and has a valid companion owner. Do not
@@ -1851,6 +1874,10 @@ TIMER_FUNC(population_engine_global_combat_timer)
 		map_session_data *owner = pop_companion_owner(sd);
 		if (!owner)
 			continue;
+		// Same-map companion corpses are deliberately inert but remain registered
+		// so party Resurrection and Yggdrasil Leaf can target the original actor.
+		if (pc_isdead(sd))
+			continue;
 		// Town-origin Wander/Support shells do not normally own a combat session.
 		// Start one only after real party membership exists so every recruited
 		// shell gets the same companion combat rules regardless of origin.
@@ -1909,16 +1936,6 @@ TIMER_FUNC(population_engine_respawn_shell_timer)
 	}
 	if (!pc_isdead(sd))
 		return 0;
-	// Companion death is terminal for this prototype. Reusing a fake PC's GID
-	// for an in-place respawn leaves duplicate clickable actors in some clients.
-	// Release from this deferred timer (rather than inside pc_dead) so the death
-	// pipeline has completed before party membership and the shell are freed.
-	if (pop_is_companion(sd)) {
-		ShowInfo("Population engine: companion %s died and is leaving the party.\n", sd->status.name);
-		population_engine_shell_release(sd);
-		return 0;
-	}
-
 	map_session_data *owner = pop_companion_owner(sd);
 	const int16_t respawn_map = owner ? owner->m : sd->pop.spawn_map_id;
 	struct map_data *mapdata = (respawn_map >= 0) ? map_getmapdata(respawn_map) : nullptr;
@@ -2010,13 +2027,24 @@ void population_engine_on_shell_death(map_session_data *sd)
 			delete_timer(sd->pop.respawn_timer, population_engine_respawn_shell_timer);
 		sd->pop.respawn_timer = INVALID_TIMER;
 	}
-	const bool companion = pop_is_companion(sd);
-	// Companion cleanup only needs to be deferred beyond pc_dead; ambient Mortal
-	// shells retain the original five-second respawn delay.
-	sd->pop.respawn_timer = add_timer(gettick() + (companion ? 100 : 5000),
+	if (pop_is_companion(sd)) {
+		// Keep the original corpse in the map grid and the real party.  Movement
+		// and combat timers skip dead shells; the stale collector removes it only
+		// after the owner leaves this map.
+		population_shell_target_change(sd, 0);
+		sd->pop.sticky_target_id = 0;
+		sd->pop.sticky_until = 0;
+		sd->pop.companion_formation_active = false;
+		unit_stop_attack(sd);
+		if (unit_is_walking(sd))
+			unit_stop_walking(sd, USW_FIXPOS);
+		ShowInfo("Population engine: companion %s died and remains available for resurrection.\n",
+			sd->status.name);
+		return;
+	}
+	// Ambient Mortal shells retain their original five-second respawn delay.
+	sd->pop.respawn_timer = add_timer(gettick() + 5000,
 		population_engine_respawn_shell_timer, sd->id, 0);
-	if (companion)
-		ShowInfo("Population engine: companion %s died; party removal scheduled.\n", sd->status.name);
 }
 
 void population_engine_on_shell_kills_player(map_session_data *killer_sd, map_session_data *victim_sd)
