@@ -1175,6 +1175,38 @@ elif s.count(old) == 1:
 else:
     sys.exit("SkillListCommon.js: getSkillPosition() no longer matches (%d hits); re-check the patch" % s.count(old))
 
+# 0019 - Keep dead player-character GIDs addressable for resurrection.
+#
+# NOTIFY_VANISH with VT.DEAD is not a true removal for a PC: the server keeps
+# the actor on the map and later sends ZC_RESURRECTION for that same GID.
+# roBrowser removed the GID lookup immediately while retaining the corpse in
+# the render list. The resurrection packet could therefore not find it, and a
+# later spawn/movement packet created a second, clickable visual actor.
+# Mobs and other entities still release their GIDs immediately; their IDs may
+# actually be reused while the death animation finishes.
+p = rb / "src/Engine/MapEngine/Entity.js"
+s = p.read_text()
+old = """\t\t// Free the GID immediately so it can be reused; removeGID only drops the
+\t\t// lookup entry and keeps the entity in the render list, so the death /
+\t\t// fade-out animation continues independently. Deferring removeGID would
+\t\t// leave the GID mapped to a dying entity and let a reused GID collide.
+\t\tEntityManager.removeGID(pkt.GID);"""
+new = """\t\t// A dead PC remains a server-side actor and may be resurrected with the
+\t\t// same GID. Keep that lookup until a later EXIT/TELEPORT/OUTOFSIGHT packet
+\t\t// truly removes it; otherwise ZC_RESURRECTION cannot find the corpse and a
+\t\t// subsequent movement/spawn packet creates a second visual actor. Mobs and
+\t\t// other entity types still free their reusable GID immediately.
+\t\tif (pkt.type !== Entity.VT.DEAD || entity.objecttype !== Entity.TYPE_PC) {
+\t\t\tEntityManager.removeGID(pkt.GID);
+\t\t}"""
+if "A dead PC remains a server-side actor" in s:
+    print("Entity.js dead-PC resurrection lookup already patched")
+elif s.count(old) == 1:
+    p.write_text(s.replace(old, new, 1))
+    print("patched Entity.js (retain dead PC lookup for resurrection)")
+else:
+    sys.exit("Entity.js: death GID cleanup no longer matches (%d hits); re-check the patch" % s.count(old))
+
 PY
 
 python3 "$ROOT/scripts/patch-client-controls.py" "$ROOT" "$RB"

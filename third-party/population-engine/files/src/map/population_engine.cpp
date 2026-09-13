@@ -4340,9 +4340,9 @@ void population_engine_on_party_chat(map_session_data *from_sd, const char *mess
 	std::set<PopulationCompanionMode> requested_modes;
 	if (population_companion_has_token(tokens, "attack"))
 		requested_modes.insert(PopulationCompanionMode::Attack);
-	if (population_companion_has_token(tokens, "defensiv"))
+	if (population_companion_has_token(tokens, "defensive"))
 		requested_modes.insert(PopulationCompanionMode::Defensive);
-	if (population_companion_has_token(tokens, "passiv"))
+	if (population_companion_has_token(tokens, "passive"))
 		requested_modes.insert(PopulationCompanionMode::Passive);
 	// Short behavior aliases are deliberately accepted only as the complete
 	// message so ordinary discussions about ATK/DEF stats cannot issue orders.

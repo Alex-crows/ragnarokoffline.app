@@ -306,7 +306,7 @@ static bool pop_is_resurrection_job(uint16 job_id)
 	}
 }
 
-/// Priest-line companions always know level-4 Resurrection.  Population PCs
+/// Priest-line companions always know level-3 Resurrection.  Population PCs
 /// already bypass skill item requirements in skill_get_requirement(), so the
 /// Blue Gemstone catalyst is intentionally unlimited and never enters their
 /// inaccessible inventory.

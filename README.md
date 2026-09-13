@@ -186,8 +186,9 @@ edits marked `RAGNAROKMAC`, plus patches for the files rAthena owns. We added a
 master switch (upstream has none), made population follow the players rather
 than filling all 124 maps at once, stopped the movement tick running for
 characters nobody can see, made crowding a setting instead of a rebuild, and
-took character levels from the monsters on each map. The spawn tables and gear
-sets are edited too. That directory's README lists all of it, and the full
+took character levels from the monsters on each map. Shells can also be
+recruited as player-controlled party companions. The spawn tables and gear sets
+are edited too. That directory's README lists all of it, and the full
 modified source is here in the repository as the licence requires.
 
 The shell is **Electron**, so the same Chromium renders the client everywhere and
@@ -320,6 +321,20 @@ Characters are levelled to the map they are on, taken from the monsters that
 live there, so a starting field holds beginners in plain gear and a late-game
 map does not. Applying any of this restarts the server, so log back in
 afterwards.
+
+### Recruit up to four AI companions
+
+Population characters can join your party and follow you between maps. Whisper
+`party`, `pt`, `join`, or `invite` to one, then send it a normal party
+invitation within 60 seconds. Recruited characters fight, buff, heal, hold a
+small formation around you, and can be directed by the party leader through
+party chat.
+
+The three combat modes are Attack, Defensive, and Passive; individual
+companions can be assigned Tank, Support, or Attacker roles. Priest companions
+can resurrect party members, and dead companions can also be targeted with a
+Yggdrasil Leaf. See the complete **[AI companion guide](docs/COMPANIONS.md)**
+for commands, role behaviour, death rules, and current limitations.
 
 If your machine gets hot, this is the setting to turn down: the AI characters
 are the only part of the server that costs meaningful CPU. The game itself runs
