@@ -211,6 +211,21 @@ Automated and build verification covered:
   `f953290d14f13243a7f71360858cfb8429e0d2cfab03fc189d0940560ba59320`;
 - clean `git diff --check` and a mergeable, conflict-free Draft PR.
 
+## Verification record for companion loot ownership
+
+Manual Windows 1.2.5 acceptance covered:
+
+- loot from a recruited companion being collected by its real owner's
+  `@autoloot` setting;
+- percentage-based `@autoloot` filtering continuing to respect the owner's
+  configured drop-rate threshold; and
+- the test runtime loading the exact x64 container image built from commit
+  `4b3b981` by GitHub Actions run `34884263381`.
+
+Build verification covered a clean x64 Linux container compile, successful
+server-mod application against pinned rAthena commit `361a6d9`, a second
+idempotent application, and a clean Population Engine data validation.
+
 ## Current limitations
 
 - Companions are recruited from the ambient population. There is no Adventurer's
