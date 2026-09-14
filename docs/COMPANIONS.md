@@ -10,7 +10,7 @@ enabled. It does not alter characters or save data.
 
 ## Recruit a companion
 
-1. Create a party and make sure you are its leader.
+1. Create a party and make sure you are its leader. (`/organize <partyname>`).
 2. Whisper `party`, `pt`, `join`, or `invite` to a Population Engine character.
 3. The character stops moving and answers. You have 60 seconds to right-click
    it and choose **Party Invitation**.
