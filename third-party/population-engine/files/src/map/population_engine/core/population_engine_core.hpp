@@ -61,6 +61,14 @@ enum class MovementOwnerReason : uint8 {
 	PathRecovery   = 5,
 };
 
+/// Player-controlled engagement policy for a recruited party companion.
+/// This is deliberately separate from the YAML Role: combat specialization.
+enum class PopulationCompanionMode : uint8 {
+	Passive   = 0, ///< Never acquire a monster target; support/follow remain active.
+	Defensive = 1, ///< Assist the owner and defend party members (safe default).
+	Attack    = 2, ///< Independently engage monsters near the owner.
+};
+
 // ---------------------------------------------------------------------------
 // Local navigation FSM
 // ---------------------------------------------------------------------------

@@ -22,6 +22,11 @@ patches/** linguist-vendored
 # GPL-3.0 from upstream, with our changes marked RAGNAROKMAC.
 third-party/** linguist-vendored
 
+# Unified diffs necessarily contain a leading patch marker before source
+# indentation and blank context lines. Do not report that syntax as whitespace
+# errors in the patch file itself.
+third-party/population-engine/patches/*.patch -whitespace
+
 # Generated or fetched at build time and never edited by hand.
 docs-site/bun.lock linguist-generated
 patches/package-lock.json linguist-generated

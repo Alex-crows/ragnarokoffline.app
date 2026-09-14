@@ -43,7 +43,7 @@ index e1ef127..921806a 100644
 +{ "population_engine_level_from_map",&battle_config.population_engine_level_from_map,1,0,1,},
  { "population_engine_max_count",&battle_config.population_engine_max_count,1000,1,30000,},
  { "population_engine_equipment_strict_load",&battle_config.population_engine_equipment_strict_load,0,0,1,},
- { "population_engine_chat_enable",&battle_config.population_engine_chat_enable,0,0,1,},
+ { "population_engine_chat_enable",&battle_config.population_engine_chat_enable,1,0,1,},
 diff --git a/src/custom/battle_config_struct.inc b/src/custom/battle_config_struct.inc
 index 03e5b76..4c88470 100644
 --- a/src/custom/battle_config_struct.inc

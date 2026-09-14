@@ -2,8 +2,9 @@
 
 Server-side fake players for rAthena: "shells" that walk, fight, sit, chat and
 open real vending stalls, and that appear to any client as ordinary players in
-the player list. No client modification is involved, so nothing on the
-roBrowser side of this app knows they exist.
+the player list. Ambient shells and party recruitment use normal rAthena
+packets. Companion resurrection additionally needs the generic dead-PC
+lifecycle correction installed by `scripts/patch-client.sh`, described below.
 
 | | |
 |---|---|
@@ -72,9 +73,56 @@ This switch is worth offering upstream.
 
 ## What we changed, beyond the switch
 
-Two behavioural changes, both marked `RAGNAROKMAC` in the vendored sources.
+The behavioural changes below are marked `RAGNAROKMAC` in the vendored sources.
 They exist because upstream is tuned for a public server with hundreds of real
 players, and this app is nearly always one person and a couple of friends.
+
+### Recruitable party companions
+
+A real player can recruit up to four shells into a normal rAthena party. The
+player first whispers `party`, `pt`, `join`, or `invite`; the shell stops for a
+60-second invitation window and accepts that player's formal party request.
+After joining it:
+
+- follows its recruiter between maps and teleports back when separated;
+- uses deterministic free cells around the recruiter while idle;
+- shares EXP through the ordinary rAthena party system;
+- uses the same class, equipment, and skill data it had as an ambient shell;
+- obeys party-wide Attack, Defensive, and Passive modes; and
+- accepts individual Tank, Support, and Attacker roles from the party leader.
+
+Only party-leader messages in party chat are commands. Full mode words can sit
+inside sentences; the `atk`, `def`, and `pass` aliases must be the entire
+message to avoid collisions with normal stat discussion. Role commands require
+the shell's exact name and answer in party chat so the assignment is visible.
+See the [AI companion guide](../../docs/COMPANIONS.md) for the player-facing
+command reference. Implementation invariants, verification evidence, and the
+future-work backlog are kept in the
+[AI companion development guide](../../docs/COMPANION_DEVELOPMENT.md).
+
+Companion death uses real PC semantics. The original actor stays targetable on
+the map and in the party. Priest-line shells can cast level 3 Resurrection with
+an intentionally unlimited virtual Blue Gemstone supply, and Yggdrasil Leaves
+work normally when a player targets the corpse. Leaving the map releases a dead
+companion. Ambient mortal shells retain their original timed-respawn behaviour.
+
+The matching roBrowserLegacy change is installed by `scripts/patch-client.sh`:
+a dead PC keeps its `EntityManager` GID until a genuine removal packet arrives,
+allowing `ZC_RESURRECTION` to update the existing corpse instead of creating a
+second visual actor.
+
+### Appearance, names, and ambient chat
+
+Hair and clothes now use rAthena's client-supported palette constants instead
+of hard-coded ranges that selected invalid values and collapsed most shells to
+the same red-haired fallback. Profile ranges remain able to narrow the choice.
+
+The generated-name tables use a root, consonant bridge, and ending structure,
+providing 16,896 pronounceable combinations before repetition. The same shape
+is used by the compiled fallback when no YAML-generated name is available.
+
+Ambient chat now reports whether its timer is enabled at server startup. The
+existing configurable chat categories and cooldowns are otherwise unchanged.
 
 ### Demand-driven population
 

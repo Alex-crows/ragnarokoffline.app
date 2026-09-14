@@ -4,8 +4,8 @@ A world of one can feel like a world of one. The population engine fills towns
 and fields with characters who walk around, fight, sit in Prontera and open
 stalls.
 
-They are server-side and need no client changes, so friends who join see the
-same crowd you do.
+They appear as ordinary players, so friends who join see the same crowd and
+companions you do.
 
 ## Enable
 
@@ -24,6 +24,57 @@ A ceiling across every map at once, not a target. Spawning is demand-driven —
 only maps somebody is on get built, and a map holds twenty to forty by the
 spawn tables — so this only binds if a group fans out across dozens of maps at
 once. In a solo game it never comes into play.
+
+## AI companions
+
+Any fake player can become a temporary party companion. Create a party, whisper
+`party`, `pt`, `join`, or `invite` to the character, and send a normal party
+invitation within 60 seconds. It accepts automatically. A party can have up to
+four companions.
+
+Companions follow their recruiter across maps, catch up by teleporting when
+necessary, and take separate positions around the player while idle. Removing
+one from the party releases it. Companions and their assigned behaviour do not
+persist across a server or app restart.
+
+### Party-chat controls
+
+Only the current party leader can control companions, and commands work only in
+party chat. Matching is case-insensitive.
+
+| Mode | Role in combat |
+|---|---|
+| `attack` or a message containing that word | All companions independently engage monsters near their owner. |
+| `defensive` or a message containing that word | Companions attack the owner's target and defend party members. This is the default. |
+| `passive` or a message containing that word | Companions ignore monsters but continue following and using support skills. |
+
+The quick versions are `atk`, `def`, and `pass`. To prevent accidental orders
+while discussing character stats, a quick command must be the entire message.
+
+Assign a role to one companion with its name and a role word, in either order:
+
+```text
+Mirarir attacker
+Galashiel supp
+Hanaban tk
+```
+
+Tank (`tank`, `tk`) prioritises threats to the party. Support (`support`,
+`supp`) moves toward injured allies and uses ally skills. Attacker (`attacker`,
+`dd`) focuses on offense and skips ally-targeted skills. The companion confirms
+the change in party chat. Roles guide skills the class already has; they do not
+turn a class without healing skills into a healer.
+
+### Death and resurrection
+
+A dead companion remains in the party and can be targeted while its owner stays
+on the same map. Priest-line companions automatically use level 3 Resurrection
+on dead players or companions, restoring 50% HP. Their Blue Gemstone supply is
+virtual and unlimited because shells have no accessible inventory. Players can
+also use a Yggdrasil Leaf on a dead companion.
+
+Leaving the map while a companion is dead releases it and removes it from the
+party.
 
 ## What it costs
 
