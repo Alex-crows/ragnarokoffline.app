@@ -28,7 +28,7 @@ than standing on top of one another.
 Removing a companion from the party releases it. Companions are temporary and
 are not restored after the local server or app is shut down.
 
-## Combat modes
+## Combat Modes
 
 Only the current party leader can issue orders, and only messages sent through
 party chat are interpreted. Commands are case-insensitive.
@@ -39,15 +39,15 @@ party chat are interpreted. Commands are case-insensitive.
 | Defensive | `defensive` | `def` | Attacks the owner's target and monsters threatening the party. This is the default. |
 | Passive | `passive` | `pass` | Ignores monsters while continuing to follow, buff, heal, and resurrect. |
 
-The long command may appear as a word in a sentence, for example
-`Everyone, attack now!`. A quick command must be the complete party-chat
-message so ordinary discussion of ATK or DEF stats does not accidentally issue
-an order. A message containing more than one combat mode is ignored.
+The long command may appear as a word in a sentence, for example `Everyone, attack now!`.
+A quick command must be sent as a standalone party-chat message containing only the command word.
+This prevents normal mentions of terms such as ATK or DEF from being interpreted as orders.
+A message containing more than one combat mode is ignored.
 
-Combat-mode orders affect every companion in the party. The leader receives a
+Combat mode orders affect every companion in the party. The leader receives a
 local confirmation with the selected mode and the number of affected shells.
 
-## Roles
+## Combat Roles
 
 Assign a role by writing the companion's exact name and one role in party chat.
 The order of the words does not matter, and both names and roles are
@@ -79,7 +79,7 @@ engages, while each role decides *how* that companion behaves once involved.
 A defeated companion stays in the party as a corpse while its owner remains on
 the same map. It can be revived in either of two ways:
 
-- Priest-line companions automatically cast level 3 Resurrection on dead party
+- Priest class companions automatically cast level 3 Resurrection on dead party
   members, including real players and other companions. Their virtual Blue
   Gemstone supply is unlimited because shells have no player-accessible
   inventory.
