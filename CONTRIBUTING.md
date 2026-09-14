@@ -20,7 +20,10 @@ you would rather do it yourself.
 
 1. Pick an [open issue](https://github.com/Flux159/ragnarokoffline.app/issues),
    or open one describing what you want to change.
-2. Fork the repository, clone your fork, and make a branch.
+2. Fork the repository, clone your fork, and make a branch. If the change
+   belongs in **nebula, rAthena, roBrowserLegacy or the Rust RemoteClient**,
+   clone that repository too and open the pull request there; see
+   [Changes that belong in another repository](#changes-that-belong-in-another-repository).
 3. Read [CLAUDE.md](CLAUDE.md) (also available as `AGENTS.md`), then the
    **Architecture** section of the [README](README.md).
 4. Make the change, and build and test it the way [Testing](#testing) describes
@@ -46,8 +49,10 @@ Follow these in addition to everything below:
   public release on its own. The maintainer releases.
 - **Do not add dependencies to `stack/` or `examples/mods/randomizer/`.** They
   have none, on purpose; CLAUDE.md explains why.
-- **Fixes to rAthena or roBrowserLegacy go to our forks, not into patch
-  scripts.** See [Changing rAthena or roBrowserLegacy](#changing-rathena-or-robrowserlegacy).
+- **Changes to nebula, rAthena, roBrowserLegacy or the Rust RemoteClient go to
+  that project's repository**, as a pull request there, followed by a small pull
+  request here that moves the pin. Do not patch around them from this
+  repository. See [Changes that belong in another repository](#changes-that-belong-in-another-repository).
 - **Report what you actually verified.** A pull request that says "built on
   macOS, not run on Windows" is far more useful than one that implies
   everything was tested.
@@ -74,6 +79,8 @@ merges.
 | `patches/`, `scripts/patch-client.sh`, `scripts/patch-client-controls.py` | the app's own additions to the game window | stylist, extension hooks, controls |
 | [Flux159/roBrowserLegacy](https://github.com/Flux159/roBrowserLegacy) (`ragnarokoffline` branch) | fixes to the game window itself | a bug in roBrowserLegacy |
 | [Flux159/rathena](https://github.com/Flux159/rathena) (`ragnarokoffline` branch) | fixes to the game server itself | a bug in rAthena |
+| [Flux159/nebula](https://github.com/Flux159/nebula) | the microVM engine, and `docker-slim`, the container client the app ships | the VM will not boot, guest images, container runtime |
+| [Flux159/roBrowserLegacy-RemoteClient-Rust](https://github.com/Flux159/roBrowserLegacy-RemoteClient-Rust) | the asset server | file resolution, GRF decoding, the WebSocket-to-TCP proxy |
 | `third-party/population-engine/` | the AI population and companions, compiled into the server | fake players and companions |
 | `containers/` | the rAthena and MariaDB images | how the server is built and run |
 | `mods/`, `examples/mods/`, `registry/` | bundled mods, worked examples, the mod index | mods |
@@ -279,7 +286,54 @@ built when a release is tagged. For anything a player can see, a build you have
 actually played is the real test. Say in the pull request which platforms you
 ran it on.
 
-## Changing rAthena or roBrowserLegacy
+## Changes that belong in another repository
+
+Ragnarok Offline is assembled from five repositories. When what you need to
+change lives in one of the other four, clone **that** repository, make the change
+there, and open the pull request **there**. This repository only records which
+version of each one it builds, so a second, small pull request here then moves
+that pin.
+
+| Project | What it is | Clone | Pull request against | Pinned here by |
+|---|---|---|---|---|
+| [nebula](https://github.com/Flux159/nebula) | the microVM engine, and `docker-slim`, the container client the app ships | `git clone https://github.com/Flux159/nebula.git` | its default branch | a released engine kit: `config/NEBULA_MIN_VERSION` and `NEBULA_VERSION` in `.github/workflows/build.yml`, which must match. `docker-slim` separately, by commit, in `config/DOCKER_SLIM_PIN` |
+| [RemoteClient (Rust)](https://github.com/Flux159/roBrowserLegacy-RemoteClient-Rust) | the asset server | `git clone https://github.com/Flux159/roBrowserLegacy-RemoteClient-Rust.git` | its default branch | a commit, in `config/REMOTECLIENT_PIN` |
+| [rAthena](https://github.com/Flux159/rathena) (our fork) | the game server | `git clone https://github.com/Flux159/rathena.git` | the `ragnarokoffline` branch | a commit, in `config/VENDOR_PINS` |
+| [roBrowserLegacy](https://github.com/Flux159/roBrowserLegacy) (our fork) | the game window | `git clone https://github.com/Flux159/roBrowserLegacy.git` | the `ragnarokoffline` branch | a commit, in `config/VENDOR_PINS` |
+
+Clone it beside this repository (for example both under `~/Projects`), and fork
+it first if you cannot push to it. Then:
+
+1. **Read that repository's own README**, and its `CLAUDE.md` where it has one.
+   Its build and test steps are its own, not the ones in this file.
+2. **Open the pull request there**, described the way
+   [Opening a pull request](#opening-a-pull-request) says.
+3. **Try it in the app** before asking for the pin to move:
+   - nebula: build an embed kit from your checkout with nebula's
+     `scripts/embed-kit.sh` and point `NEBULA_EMBED_KIT` at it when packaging
+     (step 2 above). For `docker-slim`, push your commit, set
+     `config/DOCKER_SLIM_PIN` to it and run `scripts/build-docker-slim.sh`.
+   - RemoteClient: push your commit, set `config/REMOTECLIENT_PIN` to it and
+     run `scripts/build-remoteclient.sh`. Or point `REMOTECLIENT_BIN` at your
+     own `cargo build --release` output.
+   - rAthena or roBrowserLegacy: fetch your branch into `vendor/`, as
+     [docs/FORKS.md](docs/FORKS.md) shows.
+4. **Open the pull request here that moves the pin**, and link the other one:
+   - nebula: the app takes nebula as a release, and releases are cut by the
+     maintainer, so ask for one in your nebula pull request. Then set
+     `config/NEBULA_MIN_VERSION` and `NEBULA_VERSION` in `build.yml` to it
+     together. For `docker-slim`, set `config/DOCKER_SLIM_PIN` to the merged
+     commit.
+   - RemoteClient: set `config/REMOTECLIENT_PIN` to the merged commit, a full
+     40-character hash.
+   - rAthena or roBrowserLegacy: `scripts/vendor-bump.sh <rathena|roBrowserLegacy>`.
+
+Some changes need both sides at once, such as a protocol change between the
+app and the RemoteClient. Pin the other pull request's commit while both are in
+review, say so in both descriptions, and move the pin to the merged commit before
+this one merges.
+
+### rAthena and roBrowserLegacy
 
 The app builds both from our forks, and [docs/FORKS.md](docs/FORKS.md) is the
 full guide. The rules that matter most:
