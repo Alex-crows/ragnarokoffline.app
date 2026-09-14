@@ -112,6 +112,14 @@ branch ([docs/FORKS.md](../../docs/FORKS.md)): a dead PC keeps its
 allowing `ZC_RESURRECTION` to update the existing corpse instead of creating a
 second visual actor.
 
+Ranged companion ammunition is also virtual because shell inventories are not
+player-accessible. A single runtime module provisions and validates arrows for
+bow-line weapons, bullets for every rAthena gun weapon type, and skill-driven
+shuriken or elemental kunai for Ninja classes. It selects useful elemental
+ammo for the current target and repairs the equipped stack after map changes.
+All ammo uses normal `pc_isequip`/`pc_equipitem` validation; invalid items are
+never forced into the equipment slot.
+
 ### Appearance, names, and ambient chat
 
 Hair and clothes now use rAthena's client-supported palette constants instead
