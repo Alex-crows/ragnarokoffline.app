@@ -144,6 +144,7 @@ listed above.
 | `third-party/population-engine/files/src/map/population_engine/core/population_shell_state.hpp` | Companion runtime state in the normal engine layout |
 | `third-party/population-engine/files/src/map/population_engine/core/population_shell_combat_skills.hpp` | Matching runtime state in the combat-skills layout; keep both state definitions aligned |
 | `third-party/population-engine/patches/0001-population-engine-hooks.patch` | rAthena-owned hooks, including party acceptance, membership callbacks, damage/death integration, and population ally semantics |
+| `third-party/population-engine/patches/0003-companion-loot-owner.patch` | Redirects recruited-shell loot priority to the active same-map owner and excludes recruited shells as item-share recipients; ambient shells, real-player sharing, and EXP attribution are unchanged |
 | `scripts/apply-party-chat-hook.py` | Idempotently inserts the party-chat command hook into pinned `clif.cpp` without a fragile line-number patch |
 | `scripts/apply-server-mods.sh` | Copies engine-owned files, applies rAthena patches, then installs the party-chat hook |
 | [Flux159/roBrowserLegacy](https://github.com/Flux159/roBrowserLegacy/commits/ragnarokoffline) | The dead-PC GID lifecycle correction, as the commit "Entity: keep a dead player's GID so resurrection finds the corpse" on `ragnarokoffline`; its message carries the rationale ([FORKS.md](FORKS.md)) |

@@ -1309,6 +1309,14 @@ static map_session_data *pop_companion_owner(map_session_data *sd)
 	return owner;
 }
 
+map_session_data *population_engine_companion_loot_owner(map_session_data *shell)
+{
+	map_session_data *owner = pop_companion_owner(shell);
+	if (!owner || owner->m != shell->m)
+		return nullptr;
+	return owner;
+}
+
 /// Assign each recruited shell a deterministic, unobstructed idle cell around
 /// its owner. Recomputing from stable shell IDs keeps the layout consistent
 /// without persisting party-slot bookkeeping across map changes.
