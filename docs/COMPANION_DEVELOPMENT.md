@@ -302,15 +302,19 @@ correctly unequipped the invalid bullet on a map change.
 The replacement is centralized in `population_shell_ammo.*`:
 
 - bows, musical instruments, and whips use a curated arrow pool;
-- revolvers, rifles, Gatling guns, shotguns, and grenade launchers use valid
-  bullets, matching rAthena's basic-attack ammunition rules;
-- Ninja classes receive level-appropriate shuriken and elemental kunai for
-  skills whose `AmmoType` requires them;
+- revolvers, rifles, Gatling guns and shotguns use valid bullets, and grenade
+  launchers use bullets in renewal and spheres in pre-renewal, matching
+  rAthena's basic-attack ammunition rules;
+- level-appropriate shuriken and elemental kunai are stocked when a skill whose
+  `AmmoType` requires them is about to be used, not carried by every Ninja;
 - elemental ammunition is selected against the current monster where useful;
 - every item is equipped through `pc_equipitem` and must pass `pc_isequip`;
-- inaccessible shell inventories are replenished as a virtual resource; and
+- inaccessible shell inventories are replenished as a virtual resource, but
+  never past rAthena's first overweight threshold, since a shell at 90% cannot
+  attack; and
 - provisioning runs at spawn, after companion map warps, and immediately
-  before attacks so an equip cooldown cannot permanently strand a shell.
+  before attacks. An equip cooldown (Desperado, Arrow Vulcan) blocks a swap,
+  not an attack with the stack already equipped.
 
 The legacy `setarrow` profile scripts and the unsafe direct ammo-slot write are
 no longer part of built-in profile provisioning. The script commands remain
