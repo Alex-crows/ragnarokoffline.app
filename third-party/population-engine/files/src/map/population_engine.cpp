@@ -1317,6 +1317,11 @@ map_session_data *population_engine_companion_loot_owner(map_session_data *shell
 	return owner;
 }
 
+bool population_engine_is_recruited_companion(const map_session_data *sd)
+{
+	return sd && population_engine_is_population_pc(sd->id) && pop_is_companion(sd);
+}
+
 /// Assign each recruited shell a deterministic, unobstructed idle cell around
 /// its owner. Recomputing from stable shell IDs keeps the layout consistent
 /// without persisting party-slot bookkeeping across map changes.
